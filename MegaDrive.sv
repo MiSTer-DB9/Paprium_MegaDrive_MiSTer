@@ -19,10 +19,233 @@
 
 module emu
 (
-	`include "sys/emu_ports.vh"
+	//Master input clock
+	input         CLK_50M,
+
+	//Async reset from top-level module.
+	//Can be used as initial reset.
+	input         RESET,
+
+	//Must be passed to hps_io module
+	inout  [45:0] HPS_BUS,
+
+	//Base video clock. Usually equals to CLK_SYS.
+	output        CLK_VIDEO,
+
+	//Multiple resolutions are supported using different CE_PIXEL rates.
+	//Must be based on CLK_VIDEO
+	output        CE_PIXEL,
+
+	//Video aspect ratio for HDMI. Most retro systems have ratio 4:3.
+	//if VIDEO_ARX[12] or VIDEO_ARY[12] is set then [11:0] contains scaled size instead of aspect ratio.
+	output [12:0] VIDEO_ARX,
+	output [12:0] VIDEO_ARY,
+
+	output  [7:0] VGA_R,
+	output  [7:0] VGA_G,
+	output  [7:0] VGA_B,
+	output        VGA_HS,
+	output        VGA_VS,
+	output        VGA_DE,    // = ~(VBlank | HBlank)
+	output        VGA_F1,
+	output [1:0]  VGA_SL,
+	output        VGA_SCALER, // Force VGA scaler
+	output        VGA_DISABLE, // analog out is off
+
+	input  [11:0] HDMI_WIDTH,
+	input  [11:0] HDMI_HEIGHT,
+	output        HDMI_FREEZE,
+	output        HDMI_BLACKOUT,
+	output        HDMI_BOB_DEINT,
+
+`ifdef MISTER_FB
+	// Use framebuffer in DDRAM
+	// FB_FORMAT:
+	//    [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
+	//    [3]   : 0=16bits 565 1=16bits 1555
+	//    [4]   : 0=RGB  1=BGR (for 16/24/32 modes)
+	//
+	// FB_STRIDE either 0 (rounded to 256 bytes) or multiple of pixel size (in bytes)
+	output        FB_EN,
+	output  [4:0] FB_FORMAT,
+	output [11:0] FB_WIDTH,
+	output [11:0] FB_HEIGHT,
+	output [31:0] FB_BASE,
+	output [13:0] FB_STRIDE,
+	input         FB_VBL,
+	input         FB_LL,
+	output        FB_FORCE_BLANK,
+
+`ifdef MISTER_FB_PALETTE
+	// Palette control for 8bit modes.
+	// Ignored for other video modes.
+	output        FB_PAL_CLK,
+	output  [7:0] FB_PAL_ADDR,
+	output [23:0] FB_PAL_DOUT,
+	input  [23:0] FB_PAL_DIN,
+	output        FB_PAL_WR,
+`endif
+`endif
+
+	output        LED_USER,  // 1 - ON, 0 - OFF.
+
+	// b[1]: 0 - LED status is system status OR'd with b[0]
+	//       1 - LED status is controled solely by b[0]
+	// hint: supply 2'b00 to let the system control the LED.
+	output  [1:0] LED_POWER,
+	output  [1:0] LED_DISK,
+
+	// I/O board button press simulation (active high)
+	// b[1]: user button
+	// b[0]: osd button
+	output  [1:0] BUTTONS,
+
+	input         CLK_AUDIO, // 24.576 MHz
+	output [15:0] AUDIO_L,
+	output [15:0] AUDIO_R,
+	output        AUDIO_S,   // 1 - signed audio samples, 0 - unsigned
+	output  [1:0] AUDIO_MIX, // 0 - no mix, 1 - 25%, 2 - 50%, 3 - 100% (mono)
+
+	//ADC
+	inout   [3:0] ADC_BUS,
+
+	//SD-SPI
+	output        SD_SCK,
+	output        SD_MOSI,
+	input         SD_MISO,
+	output        SD_CS,
+	input         SD_CD,
+
+	//High latency DDR3 RAM interface
+	//Use for non-critical time purposes
+	output        DDRAM_CLK,
+	input         DDRAM_BUSY,
+	output  [7:0] DDRAM_BURSTCNT,
+	output [28:0] DDRAM_ADDR,
+	input  [63:0] DDRAM_DOUT,
+	input         DDRAM_DOUT_READY,
+	output        DDRAM_RD,
+	output [63:0] DDRAM_DIN,
+	output  [7:0] DDRAM_BE,
+	output        DDRAM_WE,
+
+	//SDRAM interface with lower latency
+	output        SDRAM_CLK,
+	output        SDRAM_CKE,
+	output [12:0] SDRAM_A,
+	output  [1:0] SDRAM_BA,
+	inout  [15:0] SDRAM_DQ,
+	output        SDRAM_DQML,
+	output        SDRAM_DQMH,
+	output        SDRAM_nCS,
+	output        SDRAM_nCAS,
+	output        SDRAM_nRAS,
+	output        SDRAM_nWE,
+
+`ifdef MISTER_DUAL_SDRAM
+	//Secondary SDRAM
+	//Set all output SDRAM_* signals to Z ASAP if SDRAM2_EN is 0
+	input         SDRAM2_EN,
+	output        SDRAM2_CLK,
+	output [12:0] SDRAM2_A,
+	output  [1:0] SDRAM2_BA,
+	inout  [15:0] SDRAM2_DQ,
+	output        SDRAM2_nCS,
+	output        SDRAM2_nCAS,
+	output        SDRAM2_nRAS,
+	output        SDRAM2_nWE,
+`endif
+
+	input         UART_CTS,
+	output        UART_RTS,
+	input         UART_RXD,
+	output        UART_TXD,
+	output        UART_DTR,
+	input         UART_DSR,
+
+	// Open-drain User port.
+	// 0 - D+/RX
+	// 1 - D-/TX
+	// 2..6 - USR2..USR6
+	// Set USER_OUT to 1 to read from USER_IN.
+	output	USER_OSD,
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: per-pin push-pull mask
+	output	[7:0] USER_PP,
+	// [MiSTer-DB9 END]
+	input   [7:0] USER_IN,
+	output  [7:0] USER_OUT,
+
+	input         OSD_STATUS
 );
 
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_PP default (SNAC drives TH + splitter SEL push-pull)
+assign USER_PP = snac_active ? 8'b00010001 : USER_PP_DRIVE;
+// [MiSTer-DB9 END]
 assign ADC_BUS  = 'Z;
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper + SNAC priority gate
+wire         CLK_JOY = CLK_50M;                 // Assign clock between 40-50Mhz
+wire   [1:0] joy_type_raw    = status[127:126]; // 0=Off, 1=Saturn, 2=DB9MD, 3=DB15
+wire         snac_active     = |status[63:62];  // SNAC preempts joydb on shared USER_IO
+// MT32-pi probe-suppression gate. Auto-detected from MT32 signals declared
+// elsewhere in this file (mt32_disable / mt32_use / mt32_on_primary). Hand-edit
+// if the heuristic missed your core's gate expression. Suppresses the OSD-open
+// autodetect probe so it doesn't read the RPi's I2C master traffic as a ghost
+// Saturn signature. See the fork hazard notes.
+wire         mt32_primary_active = 1'b0;
+wire   [1:0] joy_type        = snac_active ? 2'd0 : joy_type_raw;
+wire         joy_2p          = status[125];
+wire         snac_p1         = (status[63:62] == 2'd1);
+wire         snac_p2         = (status[63:62] == 2'd2);
+wire         snac_p3         = (status[63:62] == 2'd3);
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+wire         saturn_unlocked;                   // driven by hps_io UIO_DB9_KEY (0xFE)
+// [MiSTer-DB9-Pro END]
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper wires + instance
+wire   [7:0] USER_OUT_DRIVE;
+wire   [7:0] USER_PP_DRIVE;
+wire  [15:0] joydb_1, joydb_2;
+wire         joydb_1ena, joydb_2ena;
+wire  [15:0] joy_raw_payload;
+
+// [MiSTer-DB9 BEGIN] - DB9 programmable-remap matrix wires
+// joydb_*_mapped = MiSTer-standard joystick words (consumed in Layer B);
+// db9_remap_* = 0xFD selector stream driven by the hps_io instance.
+wire  [15:0] joydb_1_mapped, joydb_2_mapped;
+wire         db9_remap_cmd;
+wire   [5:0] db9_remap_byte_cnt;
+wire  [15:0] db9_remap_din;
+// [MiSTer-DB9 END]
+joydb joydb (
+  .clk             ( CLK_JOY         ),
+  .clk_sys         ( clk_sys            ),
+  .USER_IN         ( USER_IN         ),
+  .OSD_STATUS          ( OSD_STATUS          ),
+  .snac_active         ( snac_active         ),
+  .mt32_primary_active ( mt32_primary_active ),
+  .joy_type        ( joy_type        ),
+  .joy_2p          ( joy_2p          ),
+  .saturn_unlocked ( saturn_unlocked ),
+  .USER_OUT_DRIVE  ( USER_OUT_DRIVE  ),
+  .USER_PP_DRIVE   ( USER_PP_DRIVE   ),
+  .USER_OSD        ( USER_OSD        ),
+  .joydb_1         ( joydb_1         ),
+  .joydb_2         ( joydb_2         ),
+  .joydb_1ena      ( joydb_1ena      ),
+  .joydb_2ena      ( joydb_2ena      ),
+  .remap_cmd       ( db9_remap_cmd      ),
+  .remap_byte_cnt  ( db9_remap_byte_cnt ),
+  .remap_din       ( db9_remap_din      ),
+  .joydb_1_mapped  ( joydb_1_mapped     ),
+  .joydb_2_mapped  ( joydb_2_mapped     ),
+  .joy_raw         ( joy_raw_payload )
+);
+// [MiSTer-DB9 END]
+
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign BUTTONS   = osd_btn;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
@@ -111,6 +334,11 @@ localparam CONF_STR = {
 	"P1O[58:57],Stereo Mix,None,25%,50%,100%;",
 
 	"P2,Input;",
+	"P2-;",
+		// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
+	"P2O[127:126],UserIO Joystick,Off,Saturn,DB9MD,DB15;",
+	"P2O[125],UserIO Players, 1 Player,2 Players;",
+	// [MiSTer-DB9-Pro END]
 	"P2-;",
 	"P2O[4],Swap Joysticks,No,Yes;",
 	"P2O[5],6 Buttons Mode,No,Yes;",
@@ -217,7 +445,7 @@ assign CLK_VIDEO = clk_107m;
 
 wire[127:0] status;
 wire  [1:0] buttons;
-wire [11:0] joystick_0,joystick_1,joystick_2,joystick_3,joystick_4;
+wire [11:0] joystick_0_USB,joystick_1_USB,joystick_2_USB,joystick_3_USB,joystick_4_USB;
 wire  [7:0] joy0_x,joy0_y,joy1_x,joy1_y;
 wire        ioctl_download;
 wire        ioctl_wr;
@@ -247,6 +475,22 @@ wire [24:0] ps2_mouse;
 wire [21:0] gamma_bus;
 wire [15:0] sdram_sz;
 
+// ZY XMS CBA UDLR
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: programmable remap matrix
+// joydb_*_mapped carry the DB9/DB15/Saturn buttons rewired into MiSTer-standard
+// order (same bit layout as joystick_*_USB) per the user's per-core/per-devtype
+// map streamed over UIO 0xFD. The CONF_STR-derived default (gamepad_defaults)
+// reproduces the old hardcoded {joydb_1[9],joydb_1[8],...} MD permutation; layouts
+// are now redefinable in the OSD "Define DB9 buttons" flow.
+wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS? 32'b000000 : joydb_1_mapped[11:0]) : joystick_0_USB;
+wire [31:0] joystick_1 = joydb_2ena ? (OSD_STATUS? 32'b000000 : joydb_2_mapped[11:0]) : joydb_1ena ? joystick_0_USB : joystick_1_USB;
+// [MiSTer-DB9 END]
+wire [31:0] joystick_2 = joydb_2ena ? joystick_0_USB : joydb_1ena ? joystick_1_USB : joystick_2_USB;
+wire [31:0] joystick_3 = joydb_2ena ? joystick_1_USB : joydb_1ena ? joystick_2_USB : joystick_3_USB;
+wire [31:0] joystick_4 = joydb_2ena ? joystick_2_USB : joydb_1ena ? joystick_3_USB : joystick_4_USB;
+
+
+
 wire [35:0] EXT_BUS;
 
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
@@ -254,11 +498,21 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
 
-	.joystick_0(joystick_0),
-	.joystick_1(joystick_1),
-	.joystick_2(joystick_2),
-	.joystick_3(joystick_3),
-	.joystick_4(joystick_4),
+	.joystick_0(joystick_0_USB),
+	.joystick_1(joystick_1_USB),
+	.joystick_2(joystick_2_USB),
+	.joystick_3(joystick_3_USB),
+	.joystick_4(joystick_4_USB),
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joy_raw
+	.joy_raw(OSD_STATUS ? joy_raw_payload : 16'b0),
+	// programmable remap matrix selector load (UIO_DB9_MAP 0xFD)
+	.db9_remap_cmd(db9_remap_cmd),
+	.db9_remap_byte_cnt(db9_remap_byte_cnt),
+	.db9_remap_din(db9_remap_din),
+	// [MiSTer-DB9 END]
+	// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+	.saturn_unlocked(saturn_unlocked),
+	// [MiSTer-DB9-Pro END]
 	.joystick_l_analog_0({joy0_y, joy0_x}),
 	.joystick_l_analog_1({joy1_y, joy1_x}),
 
@@ -1187,12 +1441,12 @@ md_io md_io
 	.jcart_th(jcart_th),
 
 	.port1_out(md_io_port1),
-	.port1_in(PA_o  | {7{snac_port1}}),
-	.port1_dir(PA_d | {7{snac_port1}}),
+	.port1_in(PA_o  | {7{snac_p1}}),
+	.port1_dir(PA_d | {7{snac_p1}}),
 
 	.port2_out(md_io_port2),
-	.port2_in(PB_o  | {7{snac_port2}}),
-	.port2_dir(PB_d | {7{snac_port2}}),
+	.port2_in(PB_o  | {7{snac_p2}}),
+	.port2_dir(PB_d | {7{snac_p2}}),
 
 	.PS2_KEY(ps2_key),
 	.PS2_LED(ps2_kbd_led_status),
@@ -1239,33 +1493,45 @@ lightgun lightgun
 
 wire [6:0] SNAC_IN;
 wire [6:0] SNAC_OUT;
+// [MiSTer-DB9 BEGIN] - SNAC pin map: fork DB9 adapter (matches joydb9md USER_IO wiring)
 always_comb begin
-	SNAC_IN[0]  = USER_IN[1]; //up
-	SNAC_IN[1]  = USER_IN[0]; //down
-	SNAC_IN[2]  = USER_IN[5]; //left
-	SNAC_IN[3]  = USER_IN[3]; //right
-	SNAC_IN[4]  = USER_IN[2]; //b TL
-	SNAC_IN[5]  = USER_IN[6]; //c TR GPIO7
-	SNAC_IN[6]  = USER_IN[4]; //  TH
-	USER_OUT[1] = SNAC_OUT[0];
-	USER_OUT[0] = SNAC_OUT[1];
-	USER_OUT[5] = SNAC_OUT[2];
-	USER_OUT[3] = SNAC_OUT[3];
-	USER_OUT[2] = SNAC_OUT[4];
-	USER_OUT[6] = SNAC_OUT[5];
-	USER_OUT[4] = SNAC_OUT[6];
+	SNAC_IN[0]  = USER_IN[5]; //up
+	SNAC_IN[1]  = USER_IN[7]; //down
+	SNAC_IN[2]  = USER_IN[1]; //left
+	SNAC_IN[3]  = USER_IN[2]; //right
+	SNAC_IN[4]  = USER_IN[3]; //b TL
+	SNAC_IN[5]  = USER_IN[6]; //c TR
+	SNAC_IN[6]  = USER_IN[0]; //TH
+
+	USER_OUT    = USER_OUT_DRIVE; // joydb baseline (covers SNAC=Off + bit 7)
+	if (snac_active) begin
+		USER_OUT[5] = SNAC_OUT[0]; //up
+		USER_OUT[7] = SNAC_OUT[1]; //down (fork DB9 8th pin)
+		USER_OUT[1] = SNAC_OUT[2]; //left
+		USER_OUT[2] = SNAC_OUT[3]; //right
+		USER_OUT[3] = SNAC_OUT[4]; //b TL
+		USER_OUT[6] = SNAC_OUT[5]; //c TR
+		USER_OUT[0] = SNAC_OUT[6]; //TH
+		USER_OUT[4] = 1'b0; //1P selects physical P1
+	end
 end
 
-wire snac_port1 = (status[63:62] == 1);
-assign PA_i = snac_port1 ? SNAC_IN : md_io_port1;
+// 1P SNAC: raw zero-latency pass-through. The selected physical port's
+// drive lines feed SNAC_OUT verbatim and SNAC_IN feeds that port's input.
+// (Driven = direction-bit OR output-bit; pad pull-up idles released pins high.)
+wire [6:0] PA_drv = PA_d | PA_o;
+wire [6:0] PB_drv = PB_d | PB_o;
+wire [6:0] PC_drv = PC_d | PC_o;
 
-wire snac_port2 = (status[63:62] == 2);
-assign PB_i = snac_port2 ? SNAC_IN : md_io_port2;
+assign PA_i = snac_p1 ? SNAC_IN : md_io_port1;
+assign PB_i = snac_p2 ? SNAC_IN : md_io_port2;
+assign PC_i = snac_p3 ? SNAC_IN : PC_drv;
 
-wire snac_port3 = (status[63:62] == 3);
-assign PC_i = snac_port3 ? SNAC_IN : (PC_d | PC_o);
-
-assign SNAC_OUT = snac_port1 ? (PA_d | PA_o) : snac_port2 ? (PB_d | PB_o) : snac_port3 ? (PC_d | PC_o) : 7'h7F;
+assign SNAC_OUT = snac_p1 ? PA_drv
+                : snac_p2 ? PB_drv
+                : snac_p3 ? PC_drv
+                : 7'h7F;
+// [MiSTer-DB9 END]
 
 /////////////////////////  BRAM SAVE/LOAD  /////////////////////////////
 
