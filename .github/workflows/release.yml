@@ -103,6 +103,7 @@ jobs:
         MAIN_BRANCH: paprium-mdplus-port
         UPSTREAM_REPO: https://github.com/MisterPezz82/Paprium_MegaDrive_MiSTer
         UPSTREAM_BRANCH: paprium-mdplus-port
+        UPSTREAM_RELEASES_DIR: releases
         BUILD_SHA: ${{ steps.meta.outputs.build_sha }}
 
   build:
