@@ -252,7 +252,11 @@ module paprium_cart
 		.snd(snd),
 		.mcu_dati_sfx(mcu_dati_sfx),
 		.snd_l(sfx_l_raw),
-		.snd_r(sfx_r_raw)
+		.snd_r(sfx_r_raw),
+		// paprium: channel-7 diagnostic taps (Pocket's logger not carried over)
+		.dbg_ch7_vol(),
+		.dbg_ch7_empty(),
+		.dbg_ch7_wr()
 	);
 
 	always @(posedge clk) begin
