@@ -14,6 +14,32 @@ GitHub issue numbers are referenced as (#n).
 
 ---
 
+## V.07 (pending build/test) — fixed by the thekoalakoa firmware port
+
+V.07 replaces the MCU firmware with the one from **thekoalakoa's Analogue
+Pocket port** (`paprium-pocket` 0.2.5), rebuilt from krikzz `mega-ppm` via
+`patches/mega-ppm-pocket.patch`. That port found real root causes for most of
+the bugs below. **Awaiting a build — Quartus licence expired 2026-09-13.**
+
+| Issue | Root cause found by the Pocket port | Status |
+|---|---|---|
+| **C. Intercom elevator (#8)** | The game parks a decompressed level payload in cart RAM at `0x9000` and reads rows back through the window for thousands of frames. The firmware unpacks every newly loaded sprite block into its scratch area **at the same address**, so rows came back as whatever sprite art had been unpacked since — 16-tile bands under correct name tables. Scratch moved to `0x1E0000` (`PPM_SCRATCH_HIGH`). Stock `mega-ppm` has the same fault. A second fault in the same shaft: the busy flag could answer late, so a row was read before the pointer moved — busy is now held at rest and dropped only once the pointer is in place. Our old "DMA ceiling" reading was wrong. | **Fixed in V.07** |
+| **A. Animations skipped (#10)** | Two firmware faults: (1) when a block for a *new* animation could not be loaded in time the firmware rewound the object and overwrote the one-shot "restart animation" request, so attacks lost their frames (`PPM_STICKY_SWITCH` + `PPM_PIN_FALLBACK`); (2) a queued follow-up was taken as soon as a cycle ended, so a walk went idle and slid at screen transitions (`PPM_CHAIN_ONLY_AT_END`). | **Fixed in V.07** |
+| **E/F. Stage Clear jingle (#9), Punk TV (#7)** | `sfx_player_update` abandons a channel once it empties, so the game's later `sfx_loop` — which enables looping and ramps the volume — landed on a dead channel. Channels are now re-armed. Also `cmd_8C` stopped one-shot cues instead of playing them; they now play via MD+ `$11xx`, which `paprium_mdp_adapter` already decodes as play-once. | **Fixed in V.07** |
+| Sprites behind scenery (rooftop boss, elevator, subway) | Sprites were composed at frame end in a batch, so every cartridge sprite landed *after* the game's sprite masks and a mask at X=0 hid them. Composed inline on the draw command, as the reference emulator does. | **Fixed in V.07** |
+| Dropped weapons spinning forever | A dropped knife/chain/neon stick/pipe never settled. Props and actors are separated by the firmware's own per-object animation count (`PPM_CHAIN_PROP_ANIMS 32`): a prop chains at any looping end, an actor keeps the conservative rule. | **Fixed in V.07** |
+| Smashed crates/pillars keeping intact art | The frame's DMA budget was refreshed at frame *end*; once composition moved earlier each sprite tested an already-spent budget. | **Fixed in V.07** |
+| Boom Box bar graph permanently lit | Cart RAM `0x1B98–0x1BFF` is a 26-voice level feed the cartridge's music engine rewrites every row. We substitute CDDA and never sequenced the module, so the game drew its bars from uninitialised memory. Now driven from the module the firmware already unpacks. | **Fixed in V.07** |
+| Large enemies using a normal death sound | Flag `0x0100` steps the sample rate down (9600 → 6000 Hz); it was rendered as a gain instead. | **Fixed in V.07** |
+| Stereo cancellation on off-centre effects | `pan`/`vol` were read as signed at their own width, so `0x80` became −128 and the fully-open side of every off-centre effect was phase-**inverted**. Zero-extended before the signed multiply. | **Fixed in V.07** (RTL) |
+| Echo never implemented | The game requests `0x4000` constantly; now a real 166 ms delay line at 33%. | **Fixed in V.07** (RTL) |
+| "VM DAC" option producing static | The `0x1802–0x19FF` stream buffer was never initialised. Filled with mid-scale, so the option is inert rather than wrong. | **Improved in V.07** |
+
+**D. 6-button (#4)** was already solved in **V.06** by our ROM-hook virtual pad —
+the Pocket port removed the option instead, so this fix is unique to MiSTer.
+
+---
+
 ## Open
 
 ### A. Character / enemy animations skipped (#10)

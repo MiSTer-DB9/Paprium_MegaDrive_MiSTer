@@ -4,7 +4,26 @@ A MiSTer Mega Drive core fork bringing Everdrive Pro Style Paprium support to Mi
 
 This project builds on years of community reverse-engineering, preservation, emulator work, and flash-cart development.
 
+## V.07 — with huge thanks to thekoalakoa
+
+Most of the fixes in V.07 come from **[thekoalakoa](https://github.com/thekoalakoa)**,
+who ported this core to the Analogue Pocket and, in doing so, found the real root
+causes of bugs that had been open here since the beginning — the Intercom elevator
+above all. Their firmware work is a genuinely extraordinary piece of reverse
+engineering: every fix argued from hardware captures, measured against the game's
+own data, with the wrong turns written down so nobody repeats them.
+
+**Go and look at the Pocket core — it is superb:**
+### 👉 https://github.com/thekoalakoa/paprium-pocket
+
+They are also decoding the cartridge's *native* 26-voice music synthesiser, which
+nobody has ever emulated. If that lands, Paprium gets its real soundtrack back.
+
+The V.07 firmware is built from their `patches/mega-ppm-pocket.patch` (0.2.5)
+against krikzz's `mega-ppm`; the patch is included in `patches/` here.
+
 Based on prior work by:
+thekoalakoa / paprium-pocket - the Analogue Pocket core, and the firmware fixes in V.07 (https://github.com/thekoalakoa/paprium-pocket)
 Krikzz / mega-ppm (including the first-level door fix, shared ahead of release)
 adroxe / Paprium-Arcade - the Arcade Mode unlock IPS (https://github.com/adroxe/Paprium-Arcade)
 Project Little Man
