@@ -1,5 +1,5 @@
 diff --git a/mcu/mame.c b/mcu/mame.c
-index b568843..313718b 100644
+index b568843..8bb981f 100644
 --- a/mcu/mame.c
 +++ b/mcu/mame.c
 @@ -4,6 +4,252 @@
@@ -1006,7 +1006,7 @@ index b568843..313718b 100644
  
      // all blocks unused
      ppm_vram_slot *slot = ppm_vram_slots;
-@@ -275,18 +1149,539 @@ void ppm_obj_frame_start() {
+@@ -275,18 +1149,572 @@ void ppm_obj_frame_start() {
      }
  }
  
@@ -1145,6 +1145,7 @@ index b568843..313718b 100644
 +    u8 *b = &ppmio.bram[SNAP_BASE];
 +
 +    memcpy(&b[8], &ppmio.ramdp->sat_data[0], 80 * 8);
++
 +    // The 1024-byte object-table dump used to live here. It has not informed a
 +    // conclusion since the SAT ownership map was deleted, and every counter added
 +    // since has been squeezing into scraps while it sat unread. Reclaimed.
@@ -1168,6 +1169,38 @@ index b568843..313718b 100644
 +    // 80-byte write. Overflow is a compile error from here on.
 +    #define SNAP_SPARE_BYTES   56
 +    #define SNAP_OFF_T         (8 + 640 + 1024 + 80)
++
++#if PPM_OBJ_DUMP
++    // Compact object-table dump, 64 objects x 6 bytes, in the arena the onset and
++    // epoch rings leave free. Same mutual exclusion as those rings: only ONE
++    // instrument may claim the arena and the compiler decides, rather than a
++    // reader discovering the overlap in a capture.
++    #define SNAP_OFF_OBJ       (SNAP_OFF_ARENA)
++    #define SNAP_OBJ_BYTES     (64 * 6)
++    _Static_assert(SNAP_OFF_OBJ + SNAP_OBJ_BYTES <= SNAP_OFF_DISPATCH,
++                   "object dump would overrun the dispatch block");
++    #if PPM_ONSET_RING || PPM_EPOCH_RING || PPM_DA_CRC
++    #error "PPM_OBJ_DUMP and another arena user are both enabled; enable one"
++    #endif
++
++    // Big-endian, like every other counter in this block:
++    //   +0 objID low byte
++    //   +1 anim low 7 bits, bit 7 = the objID 0x8000 fresh-assign flag
++    //   +2..3 nextAnim
++    //   +4..5 obj_data+0x0A - animCounter to this firmware, `reset` to GPGX
++    for (int q = 0; q < 64; q++) {
++        ppm_intf_obj *io = &ppmio.ramdp->obj_data[q];
++        u8 *r = &b[SNAP_OFF_OBJ + q * 6];
++        u16 id = io->objID;
++        r[0] = (u8) id;
++        r[1] = (u8) ((io->anim & 0x7F) | ((id & 0x8000) ? 0x80 : 0));
++        r[2] = (u8) (io->nextAnim >> 8);
++        r[3] = (u8) io->nextAnim;
++        r[4] = (u8) (io->animCounter >> 8);
++        r[5] = (u8) io->animCounter;
++    }
++#endif
++
 +    _Static_assert(SNAP_OFF_SPARE + SNAP_SPARE_BYTES <= SNAP_OFF_T,
 +                   "snapshot counter block would overrun t[]");
 +    // t[] is 24 bytes to the end of the 1776-byte window. Guard it too: the six
@@ -1548,7 +1581,7 @@ index b568843..313718b 100644
  
      ppm_vram_slot *slot = ppm_vram_slots;
  
-@@ -299,7 +1694,22 @@ void ppm_obj_frame_end() {
+@@ -299,7 +1727,22 @@ void ppm_obj_frame_end() {
  
      ppm_close_sprite_table();
      //ppm_sdram_pointer = &ppm_sdram[0x9000 / 2];
@@ -1572,7 +1605,7 @@ index b568843..313718b 100644
  }
  
  void ppm_close_sprite_table() {
-@@ -333,6 +1743,21 @@ void ppm_close_sprite_table() {
+@@ -333,6 +1776,21 @@ void ppm_close_sprite_table() {
      dma_entry->cmdL = 0x0083;
  }
  
@@ -1594,7 +1627,7 @@ index b568843..313718b 100644
  void ppm_obj_render(uint16_t obj_slot) {
  
      ppm_intf_obj *intf_obj = &ppmio.ramdp->obj_data[obj_slot]; // interface obj
-@@ -340,12 +1765,23 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -340,12 +1798,44 @@ void ppm_obj_render(uint16_t obj_slot) {
  
      if ((intf_obj->anim & 0xff) > ppm_anim_max_index[intf_obj->objID & 0xff]) {
          printf("anim over for ID %x: 0x%x/0x%x\n", intf_obj->objID & 0xff, intf_obj->anim & 0xff, ppm_anim_max_index[intf_obj->objID & 0xff]);
@@ -1611,6 +1644,27 @@ index b568843..313718b 100644
      uint32_t offset, data_offset;
      uint32_t previous_offset = handle->anim_offset;
      uint16_t previous_counter = handle->counter;
++#if PPM_CHAIN_FRESH_QUEUE
++    // How long has the game's queue been standing? Armed on this draw = 0. A
++    // queue armed at an end, or on the draw that set the animation, means
++    // "switch when this finishes"; one armed mid-cycle is a fallback the game
++    // resolves itself within 41 draws, and acting on THAT is what strands a
++    // character in its standing pose. See mame.h for the measurements.
++    // A recycled slot must not inherit the last tenant's queue: a weapon created
++    // with its follow-up already armed would read as an old queue and never chain.
++    if (intf_obj->objID & 0x8000) {
++        handle->prev_next = 0xffff;
++    }
++    if (intf_obj->nextAnim == 0xffff) {
++        handle->queue_age = 0xff;
++    } else if (handle->prev_next == 0xffff) {
++        handle->queue_age = 0;
++    } else if (handle->queue_age < 0xff) {
++        handle->queue_age++;
++    }
++    handle->prev_next = intf_obj->nextAnim;
++    uint8_t queue_age = handle->queue_age;
++#endif
 +#if PPM_STICKY_SWITCH
 +    uint16_t previous_crtAnim = handle->crtAnim;
 +    bool switched = false;
@@ -1618,17 +1672,27 @@ index b568843..313718b 100644
  
      //	printf("Slot 0x%02x (ID 0x%04x): ", obj_slot, intf_obj->objID);
  
-@@ -363,6 +1799,9 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -363,6 +1853,19 @@ void ppm_obj_render(uint16_t obj_slot) {
          handle->anim_offset = offset;
          handle->crtAnim = intf_obj->anim;
          handle->counter = intf_obj->animCounter;
++#if PPM_ANIM_FLAG_SEMANTICS
++        // The animation has just been (re)loaded from its first frame, which is
++        // exactly what a restart request asks for - so acknowledge it by writing
++        // 0 back, as GPGX does. Without this the field never returns to 0 and the
++        // game can never issue a second request.
++        if (intf_obj->animCounter == 1) {
++            intf_obj->animCounter = 0;
++            handle->counter = 0;
++        }
++#endif
 +#if PPM_STICKY_SWITCH
 +        switched = true;
 +#endif
      } else {
          // move to next frame
  
-@@ -377,11 +1816,19 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -377,11 +1880,30 @@ void ppm_obj_render(uint16_t obj_slot) {
              offset += 4;
          } else {
              // anim is over, do we have fallback anim?
@@ -1636,7 +1700,18 @@ index b568843..313718b 100644
 +            // See PPM_CHAIN_ONLY_AT_END in mame.h: a looping animation ignores the
 +            // queued follow-up; only a terminal end (loop target 0) takes it.
 +            if (intf_obj->nextAnim != 0xffff &&
-+                (ppm_anim_data[(offset + 4) >> 2] & 0xffffffu) == 0) {
++                ((ppm_anim_data[(offset + 4) >> 2] & 0xffffffu) == 0
++#if PPM_CHAIN_FRESH_QUEUE
++                 // an actor chains at a looping end only for a queue armed at
++                 // that end - see PPM_CHAIN_FRESH_QUEUE in mame.h
++                 || queue_age <= PPM_CHAIN_FRESH_WINDOW
++#endif
++#if PPM_CHAIN_PROP_ANIMS
++                 // a prop always chains: it has no state machine behind it, and
++                 // the game drops one and never writes its animation again
++                 || ppm_anim_max_index[intf_obj->objID & 0xff] < PPM_CHAIN_PROP_ANIMS
++#endif
++                )) {
 +#else
              if (intf_obj->nextAnim != 0xffff) {
 +#endif
@@ -1648,7 +1723,20 @@ index b568843..313718b 100644
                  return;
              } else {
                  // no, take anim loop
-@@ -402,6 +1849,10 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -395,13 +1917,23 @@ void ppm_obj_render(uint16_t obj_slot) {
+         }
+ 
+         data_offset = ppm_anim_data[offset >> 2] & 0xffffffu;
++#if PPM_ANIM_FLAG_SEMANTICS
++        // Do NOT write the game's flag. Mirror it instead, so the switch test
++        // above still fires when the GAME writes it and never on our own account.
++        handle->counter = intf_obj->animCounter;
++#else
+         intf_obj->animCounter++;
+         handle->counter++;
++#endif
+     }
+ 
      // render sprite to SAT
      // > data might not be 4 bytes aligned, access via ppm_sdram <
      ppm_spr_data_hdr *spr_info = (ppm_spr_data_hdr *) & ppmio.sdram[(ppm_anim_data_base_addr + data_offset)];
@@ -1659,7 +1747,7 @@ index b568843..313718b 100644
      ppm_sat_item *satEntry = &ppmio.ramdp->sat_data[ppmio.ramdp->sat_count];
      int16_t posX = intf_obj->posX;
      int16_t posY = intf_obj->posY;
-@@ -410,6 +1861,11 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -410,6 +1942,11 @@ void ppm_obj_render(uint16_t obj_slot) {
      // load new spr data
      ppm_spr_data *spr_data = &spr_info->sprites[0];
  
@@ -1671,7 +1759,7 @@ index b568843..313718b 100644
      for (uint16_t x = 0; x < spr_info->count; spr_data++, x++) {
  
          if (!spr_data->blockNum) {
-@@ -421,26 +1877,64 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -421,26 +1958,69 @@ void ppm_obj_render(uint16_t obj_slot) {
              // break; need to iterate all to keep resevations?
          }
      }
@@ -1701,10 +1789,15 @@ index b568843..313718b 100644
              // restore offset/counter
              handle->anim_offset = previous_offset;
              handle->counter = previous_counter;
++#if PPM_ANIM_FLAG_SEMANTICS
++            // Nothing to rewind: this firmware no longer writes the field at all.
++            (void) previous_counter;
++#else
 +#if PPM_STICKY_SWITCH
 +            if (!switched)      // a refused ADVANCE rewinds the counter too; a refused switch leaves the game's reset in place
 +#endif
              intf_obj->animCounter = previous_counter;
++#endif
              data_offset = ppm_anim_data[previous_offset >> 2] & 0xffffff;
              spr_info = (ppm_spr_data_hdr *) & ppmio.sdram[(ppm_anim_data_base_addr + data_offset)];
 +#if PPM_PIN_FALLBACK
@@ -1736,7 +1829,7 @@ index b568843..313718b 100644
  
          posX += (intf_obj->attrs & 0x0800) ? spr_data->flipPosX : spr_data->posX;
          posY += spr_data->posY;
-@@ -461,7 +1955,44 @@ void ppm_obj_render(uint16_t obj_slot) {
+@@ -461,7 +2041,44 @@ void ppm_obj_render(uint16_t obj_slot) {
          satEntry->posX = posX & 0x1ff;
          satEntry->posY = posY & 0x3ff;
          satEntry->sizeNext = ((spr_data->size & 0xf) << 8) + (ppmio.ramdp->sat_count & 0xff);
@@ -1781,7 +1874,7 @@ index b568843..313718b 100644
          satEntry++;
      }
  
-@@ -482,12 +2013,34 @@ uint16_t ppm_vram_load_block(uint16_t num) {
+@@ -482,12 +2099,34 @@ uint16_t ppm_vram_load_block(uint16_t num) {
          if (slot->block_num == num) {
              slot->usage++;
              slot->age = 0;
@@ -1817,7 +1910,7 @@ index b568843..313718b 100644
          return 0;
      }
  
-@@ -505,24 +2058,68 @@ uint16_t ppm_vram_load_block(uint16_t num) {
+@@ -505,24 +2144,68 @@ uint16_t ppm_vram_load_block(uint16_t num) {
  
      // no slot available?
      if (block_index == 0xffff) {
@@ -1887,7 +1980,7 @@ index b568843..313718b 100644
      dma_entry->srcH = 0x9700;
      dma_entry->srcM = 0x9660;
      dma_entry->srcL = 0x9500; // 0xc000 source
-@@ -536,6 +2133,7 @@ uint16_t ppm_vram_load_block(uint16_t num) {
+@@ -536,6 +2219,7 @@ uint16_t ppm_vram_load_block(uint16_t num) {
      //printf("vram %x %x\n", block_index, command);
  
      return (block_index << 4);
@@ -1895,7 +1988,7 @@ index b568843..313718b 100644
  }
  
  u32 ppm_block_addr(u32 num) {
-@@ -549,6 +2147,9 @@ u32 ppm_bgm_addr(u32 num) {
+@@ -549,6 +2233,9 @@ u32 ppm_bgm_addr(u32 num) {
  }
  
  uint16_t ppm_vram_find_block(uint16_t num) { // return tile index
@@ -1906,10 +1999,19 @@ index b568843..313718b 100644
      ppm_vram_slot *slot = ppm_vram_slots;
  
 diff --git a/mcu/mame.h b/mcu/mame.h
-index 06ccf59..fd5046e 100644
+index 06ccf59..2dfbf8e 100644
 --- a/mcu/mame.h
 +++ b/mcu/mame.h
-@@ -152,9 +152,289 @@ typedef struct { //byteswapped (endianess fix)
+@@ -131,6 +131,8 @@ typedef struct {
+     uint32_t lastDisplayedOffset; //
+     uint16_t crtAnim;
+     uint16_t counter;
++    uint16_t prev_next;    // nextAnim as of the previous draw
++    uint8_t  queue_age;    // draws since the queue was armed; 255 = no queue
+ } ppm_obj;
+ 
+ typedef struct { //byteswapped (endianess fix)
+@@ -152,9 +154,446 @@ typedef struct { //byteswapped (endianess fix)
  void ppm_init_mame();
  u32 swapshorts(u32 val);
  void ppm_setup_data(uint32_t bgm_file, uint32_t unk1_file, uint32_t smp_file, uint32_t unk2_file, uint32_t sfx_file, uint32_t anm_file, uint32_t blk_file);
@@ -2059,7 +2161,164 @@ index 06ccf59..fd5046e 100644
 +// an animation with a loop target keeps looping; a queued follow-up is taken
 +// only when the animation reaches a terminal end (loop target 0), where the
 +// stock code would otherwise stop drawing the object.
++// TURNED OFF 2026-09-10. This rule is what strands dropped weapons. Objects
++// 0xDC-0xE1 (knife, pipe, wrench, pickaxe - RENDERED from ROM, not inferred) each
++// carry anim 8 = a 25-frame CYCLE (the drop spin) and anim 1 = an 85-frame CYCLE
++// (the ground idle, 6 poses mostly held - what the user describes as "animates
++// every few seconds"). A hardware capture caught objID 0xDE mid-failure: playing
++// anim 8 with anim 1 QUEUED in nextAnim. The item is asking to become the ground
++// idle, and this rule refuses the chain because anim 8 has a non-zero loop target.
++//
++// The walk-in case this rule was added for has the same cycle->cycle shape, so
++// shape cannot separate them. But 0.2.1 shipped TWO fixes together, and
++// PPM_STICKY_SWITCH is the one that addressed the measured fault (a refused art
++// load losing the game's one-shot reset). This one may simply have been an
++// unnecessary over-correction bundled with it. Turning it off is the test:
++// weapons must settle into their ground idle AND the walk-in must keep walking.
++// If the walk-in regresses, this goes back to 1 and the two cases need a real
++// discriminator.
++// REVERTED TO 1 (2026-09-10, hardware): turning this off DOES fix the dropped
++// weapons - the user confirms 0xE0 pipe, 0xDC knife, 0xDE electric stick all
++// settle into their ground idle - but it REGRESSES the walk-in to moonwalking
++// (sliding in the standing pose). Both cases are cycle->cycle with reset == 0,
++// so neither the loop target, the queued animation's shape, nor the reset flag
++// separates them. The discriminator is still unknown; see the frame-word flag
++// bits 24-30, which differ between the two (weapons 01/02, characters 03/04/05)
++// and are ignored by GPGX.
++//
++// THOSE FLAG BITS ARE NOT IT (decoded 2026-09-10). Their low nibble is the count
++// of graphics blocks a pose needs that the previous pose did NOT - a VRAM
++// streaming budget, matching on 24,764 of 24,893 pose boundaries across all 241
++// objects (99.48%). "Weapons 01/02, characters 03/04/05" is just sprite size: a
++// dropped weapon is a one-block sprite and a character a four-or-five-block one.
++// Also measured and eliminated since: obj_data+0x06 (mutable nibble-packed game
++// state, and the knife carries 0000 in one drop and 2233 in another); movement
++// while the queue is armed (BACKWARDS - the player's walk moved 0.0% of samples
++// and the knife 13.2%); and matching GPGX, which chains at every looping end and
++// therefore moonwalks the walk-in as well - confirmed by matching its logged
++// graphics blocks against the ROM's per-frame art.
++//
++// And this knob is not the narrow refinement it reads as. Across 12 minutes of
++// captured play it chains 0 of 821 chain requests: EVERY animation the game ever
++// arms a follow-up on has a nonzero loop target, so in practice this is "never
++// chain". That is why every dropped item spins.
 +#define PPM_CHAIN_ONLY_AT_END   1
++// CHAIN AT A LOOPING END ONLY WHEN THE QUEUE WAS ARMED AT THAT END (2026-09-10).
++//
++// The spawn-animation reading that stood here was REFUTED before it reached
++// hardware: a dropped knife is not spawned falling. It is created on the ground
++// at anim 1, sits there, and the game then calls setAnim(8) to make it fall -
++// the same protocol as the player's walk - so at the moment the chain is needed
++// its animation was assigned by setAnim in both cases. Measured in the emulator:
++// 38 of 42 weapon objects spawn at anim 1 already on the ground.
++//
++// What DOES separate them is WHEN the game arms the queue, relative to the
++// animation it is arming it on:
++//   knife/stick fall, anim 8: 25 frames, loops to index 1, so it ends at frame
++//     49 (25 + 24). The game arms nextAnim=1 at exactly frame 49. Eleven of
++//     eleven armings across every capture land exactly on an end.
++//   player walk-in, anim 9: 49 frames, loops to index 1, ends at 49, 97, 145.
++//     The game arms nextAnim=1 at 5, 17, 18, 19, 80 and 116 - never on an end,
++//     0 of 31.
++// So the game arms the queue ON the frame the animation finishes when it means
++// "switch now", and arms it mid-cycle when it is only a standing fallback that
++// it intends to resolve itself with a direct setAnim later. That is a
++// synchronous handshake, and it is readable with one word of state per object.
++//
++// This firmware detects the end one call LATER than the emulator does - it keeps
++// the frame just drawn and advances at the top of the next call - so the window
++// is "armed on this call or the previous one", not "this call" alone. The
++// nearest a player walk-in arming ever comes to an end is 17 frames, so the
++// window has a wide margin.
++//
++// Blast radius: about a quarter of armings land on an end, mostly the player's
++// attack animations returning to the stand, which is what chaining is for. A
++// terminal end (loop target 0) still chains unconditionally.
++//
++// STILL A GUESS as to the cartridge's actual mechanism, but it is the only rule
++// that fits both hardware-confirmed cases. See docs/PORT_PLAN.md.
++#define PPM_CHAIN_FRESH_QUEUE   1
++#define PPM_CHAIN_FRESH_WINDOW  1
++// A PROP IS NOT AN ACTOR (2026-09-11, hardware).
++//
++// Two hardware experiments bracket this exactly, and between them they say what
++// the rule has to be:
++//
++//   69e00e2  chain at EVERY looping end, all objects. Every dropped weapon
++//            settled correctly - and the character walk-in moonwalked.
++//   0.2.5a   chain at a looping end when the queue was armed with the animation
++//            (AT-LOAD) or left standing past 64 draws (STALE). The weapons
++//            settled, a little later than original hardware - and the walk-in
++//            moonwalked AGAIN.
++//
++// Both times the weapons wanted the wide rule and the characters refused it, so
++// the discriminator is not WHEN the queue was armed at all. It is WHAT the
++// object is. Those two rules both reach obj 01 anim 02 - the player's looping
++// idle, queued back to the stance and then left alone for 212 to 1,067 draws -
++// which is the only character animation either of them touches in 834,000
++// object records, and it is enough to put a moving character into a standing
++// pose.
++//
++// The cartridge cannot be doing this, but the population split is real and the
++// firmware already has it to hand: ppm_anim_max_index, the per-object animation
++// count it bounds-checks against. Measured over all 241 objects, it separates
++// with a gap and no overlap:
++//
++//   props   2, 4, 5, 10, 11, 12, 13, 16, 17, 18, 23, 29 animations
++//           - every weapon is 10: knife DC, chain DD, neon stick DE, pipe E0
++//   actors  39, 61, 157, 160, 161, 220 animations
++//           - all three playable characters are 157, every enemy 39 or more
++//
++// So: a prop takes a queued follow-up at any looping end, which is the rule
++// hardware confirmed settles every weapon; an actor keeps 0.2.4's rule exactly,
++// which is the rule hardware confirmed keeps the walk-in walking. Nothing an
++// actor does changes from the build the user tested and passed.
++//
++// This is a containment boundary, not a discovery - if the cartridge's actual
++// rule is ever found, it replaces this. What it buys is that the failure that
++// came back twice cannot come back a third time from a rule we cannot see into.
++#define PPM_CHAIN_PROP_ANIMS    32
++// obj_data+0x0A IS THE GAME'S ONE-SHOT RESTART FLAG, NOT OUR COUNTER (2026-09-10).
++// This firmware called it animCounter and INCREMENTED it every drawn frame, in
++// memory the 68000 owns and reads back. It is a flag, and the game writes 1 to
++// mean "restart this animation from frame 0".
++//
++// MEASURED, both sides:
++//   emulator, 156,868 object records across three winlog captures: the field
++//     holds ONLY 0 or 1. Never any other value.
++//   this port, on hardware, one capture with a pickup left spinning on screen:
++//     93, 137, 233, 440, 659, 900 - climbing with every frame drawn.
++// GPGX acts on the 1 and writes 0 BACK so the game can ask again
++// (gpgx-build/core/cart_hw/paprium.h:1242, inside `reload:`); this firmware never
++// zeroes it, so the game's restart request can be honoured at most ONCE and can
++// never be re-issued. The pickups sit at anim 0x01 with nextAnim 0xFFFF for their
++// whole life - no chain is ever queued, which is why every chain-based fix missed.
++// The 0.2.1 sticky-switch comment already half-named this: "a refused switch
++// leaves the game's reset in place".
++//
++// With this on: never WRITE the field; mirror it into handle->counter so the
++// switch test still detects a game write; and consume a 1 by writing 0 back, as
++// GPGX does. 0 = the shipping 0.2.2/0.2.3 behaviour.
++#define PPM_ANIM_FLAG_SEMANTICS 1
++// COMPACT OBJECT-TABLE DUMP (2026-09-10). The full 1024-byte obj_data dump was
++// reclaimed from the SAT snapshot for want of a question; the pickup-spin bug is
++// that question. Items keep looping their fall instead of taking their ground
++// pose, and NEITHER instrumented mechanism explains it - a capture measured
++// anim-over drops 0, and 5 art-refused switches of which 4 completed. So the
++// game probably never asks for the ground pose at all, and what decides that is
++// per object: anim, nextAnim, and the field at obj_data+0x0A.
++//
++// That field is worth naming carefully. mega-ppm calls it animCounter and
++// INCREMENTS it every drawn frame; GPGX calls the same offset `reset` and treats
++// it as a one-shot flag, taking a queued follow-up only when it reads 0 and
++// setting it to 1 once consumed (gpgx paprium.h, "else if( reset == 0 )"). Those
++// are incompatible readings of one field, and GPGX renders pickups correctly
++// where this port does not - so the dump records it raw, per object, and lets a
++// capture decide rather than another guess.
++//
++// 64 objects x 6 bytes = 384 bytes at SNAP_OFF_ARENA, which the onset and epoch
++// rings leave free while they are off. Diagnostic; 0 for a shipping build.
++#define PPM_OBJ_DUMP            1
 +// Crash-context heartbeat: a 40-byte record in battery RAM (bram 0xF70..0xF97,
 +// the free gap between the onset ring's meta and the dispatch block) rewritten
 +// at every command entry/exit, per object, per walked sprite, per stream DMA,
@@ -2235,7 +2494,7 @@ index fec3a4e..f570c7f 100644
  void mdp_set_vol(u8 vol);
  
 diff --git a/mcu/paprium.c b/mcu/paprium.c
-index 1a1de1d..eb1d1ea 100644
+index 1a1de1d..91d2c9b 100644
 --- a/mcu/paprium.c
 +++ b/mcu/paprium.c
 @@ -1,6 +1,10 @@
@@ -2249,7 +2508,7 @@ index 1a1de1d..eb1d1ea 100644
  
  void ppm_reset();
  void ppm_md_rst(u8 rst);
-@@ -11,6 +15,8 @@ void cmd_unknown_muted();
+@@ -11,8 +15,13 @@ void cmd_unknown_muted();
  void cmd_00();
  void cmd_81_init();
  void cmd_84_sdram_off();
@@ -2257,10 +2516,17 @@ index 1a1de1d..eb1d1ea 100644
 +void cmd_88_audio_cfg();
  void cmd_8C_bgm_play();
  void cmd_8D_bgm_cfg();
++void ppm_music_vu_start(u32 mod_addr);
++void ppm_music_vu_stop();
++void ppm_music_vu_update();
  void cmd_AD_obj_add();
-@@ -53,8 +59,10 @@ void ppm_start() {
+ void cmd_AE_frame_start();
+ void cmd_AF_frame_end();
+@@ -52,9 +61,12 @@ void ppm_start() {
+ 
          ppm_cmd_handler();
          sfx_player_update();
++        ppm_music_vu_update();
          tick_ctr++;
 +        ppm_hb_idle();
  
@@ -2269,7 +2535,7 @@ index 1a1de1d..eb1d1ea 100644
              return;
          }
      }
-@@ -64,7 +72,15 @@ void ppm_reset() {
+@@ -64,7 +76,15 @@ void ppm_reset() {
  
      ppm_md_rst(1);
      FPGAIO->ctrl.sdram_en = 1;
@@ -2286,7 +2552,7 @@ index 1a1de1d..eb1d1ea 100644
  
      printf("ppm init...\n");
  
-@@ -77,7 +93,11 @@ void ppm_reset() {
+@@ -77,7 +97,11 @@ void ppm_reset() {
      memcpy(ppmio.ramdp, ppmio.flash, 8192);
  
      ppmio.ramdp->reg_cmd = 0;
@@ -2298,7 +2564,7 @@ index 1a1de1d..eb1d1ea 100644
      ppmio.ramdp->reg_status_2.word = 0;
      ppmio.ramdp->reg_status_2.bits.mwire_status = 7; // let's pretend MW is plugged & connected
  
-@@ -133,7 +153,7 @@ void ppm_init_cmd_ptr() {
+@@ -133,7 +157,7 @@ void ppm_init_cmd_ptr() {
      }
  
      cmp_ptr[0x83] = cmd_unknown_muted; // unk startup thing
@@ -2307,7 +2573,7 @@ index 1a1de1d..eb1d1ea 100644
      cmp_ptr[0x95] = cmd_unknown_muted; // (bgm related)
      cmp_ptr[0x96] = cmd_unknown_muted; // (bgm related)
      cmp_ptr[0xA4] = cmd_unknown_muted; // megawire settings
-@@ -142,7 +162,7 @@ void ppm_init_cmd_ptr() {
+@@ -142,7 +166,7 @@ void ppm_init_cmd_ptr() {
      cmp_ptr[0xD6] = cmd_unknown_muted; //???
  
      //unknown stuff
@@ -2316,7 +2582,7 @@ index 1a1de1d..eb1d1ea 100644
      cmp_ptr[0xD0] = cmd_unknown_muted;
  
      cmp_ptr[0x00] = cmd_00;
-@@ -161,6 +181,12 @@ void ppm_init_cmd_ptr() {
+@@ -161,6 +185,12 @@ void ppm_init_cmd_ptr() {
      cmp_ptr[0xE0] = cmd_E0_eep_wr;
      cmp_ptr[0xE7] = cmd_E7_mwire;
      cmp_ptr[0xEC] = cmd_EC_vram_budget;
@@ -2329,7 +2595,7 @@ index 1a1de1d..eb1d1ea 100644
      cmp_ptr[0xF2] = cmd_F2_unpack;
      cmp_ptr[0xF4] = cmd_F4_unpack_scal;
      cmp_ptr[0xF5] = cmd_F5_stamp_rescale;
-@@ -185,16 +211,62 @@ void ppm_cmd_handler() {
+@@ -185,16 +215,62 @@ void ppm_cmd_handler() {
      ppmio.ramdp->reg_status_1 |= 0x0004;
      ppmio.ramdp->reg_status_2.bits.busy = 1;
  
@@ -2394,7 +2660,7 @@ index 1a1de1d..eb1d1ea 100644
  }
  
  void cmd_unknown() {
-@@ -233,18 +305,31 @@ void cmd_84_sdram_off() {
+@@ -233,18 +309,31 @@ void cmd_84_sdram_off() {
  
  void cmd_AD_obj_add() {
  
@@ -2426,7 +2692,7 @@ index 1a1de1d..eb1d1ea 100644
      // frame finish
      // af01: no scaling ongoing
      // af02: must reserve bandwith for scaling buffer?
-@@ -261,6 +346,10 @@ void cmd_B1_sprite_pause() {
+@@ -261,6 +350,10 @@ void cmd_B1_sprite_pause() {
  
  void cmd_C6_setup_data() {
  
@@ -2437,7 +2703,7 @@ index 1a1de1d..eb1d1ea 100644
      // load/setup base data
  
      u32 time = FPGAIO->time;
-@@ -290,13 +379,76 @@ void cmd_DA_unpack() {
+@@ -290,13 +383,76 @@ void cmd_DA_unpack() {
      u32 src = (ppmio.ramdp->cmd_args[1] << 16) + ppmio.ramdp->cmd_args[2];
      u32 dst = ppmio.ramdp->cmd_args[0];
  
@@ -2517,7 +2783,7 @@ index 1a1de1d..eb1d1ea 100644
  }
  
  void cmd_DF_eep_rd() {
-@@ -375,10 +527,18 @@ void cmd_F2_unpack() {
+@@ -375,10 +531,18 @@ void cmd_F2_unpack() {
      // todF2o: check block range
      //used in sprites test menu
  
@@ -2540,7 +2806,7 @@ index 1a1de1d..eb1d1ea 100644
  }
  
  void cmd_F4_unpack_scal() {
-@@ -390,16 +550,91 @@ void cmd_F5_stamp_rescale() {
+@@ -390,16 +554,216 @@ void cmd_F5_stamp_rescale() {
  }
  //============================================================================== audio
  
@@ -2609,6 +2875,130 @@ index 1a1de1d..eb1d1ea 100644
 +#endif
 +}
 +
++// ---------------------------------------------------------------------------
++// paprium-pocket: Boom Box VU bars.
++//
++// Cart RAM 0x1B98..0x1BFF is a per-voice stereo level feed - 26 voices of
++// {u16 L, u16 R} = 104 bytes, ending exactly at 0x1C00. On real hardware the
++// cartridge's music engine rewrites it every row with "does this voice have a
++// pattern this row"; GPGX's interpreter does the same (paprium.h:472-473,
++// `index ? 0xE0 : 0`). The Boom Box's 26-bar graph is drawn straight from it,
++// one bar per voice.
++//
++// This port substitutes CDDA and never sequences the module, so nothing wrote
++// that window at all and the game rendered its bars out of uninitialised cart
++// RAM - they sat permanently lit. Note the neighbouring 0x1802..0x19FF fill in
++// cmd_88_audio_cfg stops at 0x1A00 and never reached this.
++//
++// Rather than smear one playback level across 26 identical columns, drive the
++// bars from the module we ALREADY unpack in cmd_8C_bgm_play and then discard.
++// That is the real per-voice arrangement, at the module's own tempo, and costs
++// no RTL.
++//
++// Tempo: the row clock is the synth's own, measured against the hardware
++// captures (paprium-pocket docs/PORT_PLAN.md, "Absolute tempo, solved"):
++//
++//     row = 2*header[0x07] + (0xFA operand & 0x0F)   ticks of 1/99.8745 s
++//
++// applied per row - an 0xFA takes effect on the row it sits on and holds until
++// the next one. It is NOT frames-per-row at 60 Hz. That was GPGX's reading, and
++// under it Stage Clear looped every 4.86 s where the capture loops every 5.82 s
++// (audio envelope autocorrelation 5.824 s; the bars themselves 5.83-5.85 s;
++// 97 rows x 6 ticks = 5.827 s). The same code also ran 8 rows past the end of
++// every pattern into its null event record: header 0x0A IS the row count.
++// ---------------------------------------------------------------------------
++#define PPM_VU_BASE     0x1B98      // 68000 address of voice 0's L word
++#define PPM_VU_VOICES   26
++#define PPM_VU_ON       0x00E0      // level the cart writes for a sounding voice
++
++static u32 vu_mod   = 0;            // SDRAM address of the unpacked module
++static u16 vu_secs  = 0;            // order-list positions per voice (header 0x08)
++static u16 vu_loop  = 0;            // position playback repeats from (header 0x09)
++static u16 vu_bars  = 0;            // rows per pattern (header 0x0A, 0 = 256)
++static u16 vu_seg   = 0;
++static u16 vu_row   = 0;
++static u32 vu_due   = 0;            // ms tick the next row falls on
++static u32 vu_rem   = 0;            // remainder in 1/100000 ms, keeps the grid drift-free
++static u16 vu_base  = 8;            // 2 * header[0x07]: ticks per row before any 0xFA
++static u8  vu_fa    = 0;            // current 0xFA operand & 0x0F
++static u8  vu_on    = 0;
++
++// ppm_unpack writes through ppmio.sdram with ^1 on every byte, so read it back
++// the same way.
++static u8 vu_mb(u32 off) {
++    return ppmio.sdram[(vu_mod + off) ^ 1];
++}
++
++// ramdp is indexed MCU-side as (68000 address ^ 1), so a big-endian word at
++// 68000 address `a` splits as ram[a+1] = high byte, ram[a] = low byte.
++static void vu_put(u32 a, u16 v) {
++    vu8 *ram = (vu8 *) ppmio.ramdp;
++    ram[a + 1] = (u8) (v >> 8);
++    ram[a] = (u8) v;
++}
++
++static void vu_all(u16 v) {
++    for (int ch = 0; ch < PPM_VU_VOICES; ch++) {
++        vu_put(PPM_VU_BASE + ch * 4, v);
++        vu_put(PPM_VU_BASE + ch * 4 + 2, v);
++    }
++}
++
++void ppm_music_vu_start(u32 mod_addr) {
++    vu_mod = mod_addr;
++    vu_base = 2 * (vu_mb(0x07) ? vu_mb(0x07) : 4);
++    vu_fa = 0;
++    vu_secs = vu_mb(0x08);
++    vu_loop = (vu_mb(0x09) < vu_secs) ? vu_mb(0x09) : 0;
++    vu_bars = vu_mb(0x0A) ? vu_mb(0x0A) : 0x100;
++    vu_seg = 0;
++    vu_row = 0;
++    vu_rem = 0;
++    vu_due = FPGAIO->time;
++    vu_on = (vu_secs != 0);
++    if (!vu_on) vu_all(0);
++}
++
++void ppm_music_vu_stop() {
++    vu_on = 0;
++    vu_all(0);
++}
++
++// Called from ppm_start()'s loop, which runs far faster than the row rate, so at
++// most one row is advanced per call and the grid stays accurate.
++void ppm_music_vu_update() {
++
++    if (!vu_on) return;
++    if ((s32) (FPGAIO->time - vu_due) < 0) return;
++
++    for (int ch = 0; ch < PPM_VU_VOICES; ch++) {
++        u32 po = 0xD8 + ((u32) ch * vu_secs + vu_seg) * 2;
++        u32 ptr = ((u32) vu_mb(po) << 8) | vu_mb(po + 1);
++        u8 idx = vu_mb(ptr + vu_row);       // grid byte: index into this pattern's event table
++        u16 lvl = idx ? PPM_VU_ON : 0;
++        vu_put(PPM_VU_BASE + ch * 4, lvl);
++        vu_put(PPM_VU_BASE + ch * 4 + 2, lvl);
++        if (idx) {
++            // the 8-byte event record sits after the vu_bars grid bytes; words
++            // 1..3 are (command, operand) and 0xFA sets the row period
++            u32 ev = ptr + vu_bars + (u32) idx * 8;
++            for (int k = 2; k < 8; k += 2)
++                if (vu_mb(ev + k) == 0xFA) vu_fa = vu_mb(ev + k + 1) & 0x0F;
++        }
++    }
++
++    // this row's length: (vu_base + vu_fa) ticks of 10.01257 ms, the remainder
++    // carried in 1/100000 ms so the grid does not drift
++    u32 num = (u32) (vu_base + vu_fa) * 1001257u + vu_rem;
++    vu_due += num / 100000u;
++    vu_rem = num % 100000u;
++
++    if (++vu_row >= vu_bars) {
++        vu_row = 0;
++        if (++vu_seg >= vu_secs) vu_seg = vu_loop;
++    }
++}
++
  void cmd_8C_bgm_play() {
  
      // bgm play, check & 0x80
@@ -2619,6 +3009,7 @@ index 1a1de1d..eb1d1ea 100644
 +        u32 bl = ppm_unpack(ppm_bgm_addr(arg & 0x7f), ppm_bgm_unpack_addr);
 +        hb_w32(32, bl);
 +        if (ppm_bgm_unpack_addr + bl > PPM_SCRATCH_BASE) snap_bgm_over++;   // module reached the MCU scratch (counted, no UART on the Pocket)
++        ppm_music_vu_start(ppm_bgm_unpack_addr);   // paprium-pocket: Boom Box bars
 +    }
  
      if ((arg & 0x80)) {
@@ -2631,6 +3022,14 @@ index 1a1de1d..eb1d1ea 100644
 +        // Captured on hardware: cmd_8C track 0x35 (53), bit 7 clear, at the end
 +        // of a stage - and 53 is one of the tracks the cue sheet marks NOLOOP.
 +        mdp_play_once(arg & 0x7f);
+     }
+ }
+ 
+@@ -409,6 +773,7 @@ void cmd_8D_bgm_cfg() {
+ 
+     if (arg == 0 || arg == 8) {
+         mdp_stop();
++        ppm_music_vu_stop();   // paprium-pocket: park the Boom Box bars
      }
  }
  
