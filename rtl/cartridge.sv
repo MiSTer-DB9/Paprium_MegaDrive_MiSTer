@@ -213,7 +213,11 @@ reg         dtack_ext;
 //   move.w $11C608,d0 ; or.w d0,$FF702A   ; P1 just-pressed (FPGA edge latch)
 //   move.w $11C606,d0 ; or.w d0,$FF7038   ; P2 held
 //   move.w $11C60A,d0 ; or.w d0,$FF703A   ; P2 just-pressed
-//   tst.w  $11C600 ; beq.b +6 ; jsr $B5960.l ; rts   (arcade coin chute)
+//   tst.w $11C600 ; beq done           (arcade coin chute, latched by FPGA)
+//   tst.b $FF98D3 ; beq done           (game's credit system live?)
+//   credits $FF98D5 += 1 (cap $1F)      (as the game's handler does)
+//   coin sound via jsr $31414, gated like the game ($FF98D0, <=7)
+//   done: rts
 // Keyed on the latched rom_addr (stable when the SDRAM read completes); the
 // patch addresses sit far below the Paprium stream workspace so stream reads
 // can never alias. Gated on paprium_quirk so no other cart is ever touched.
@@ -299,14 +303,50 @@ always @(*) begin
 		23'h8E2C6: begin patch_grp = 2'd2; patch_data = 16'h8179; end
 		23'h8E2C7: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
 		23'h8E2C8: begin patch_grp = 2'd2; patch_data = 16'h703A; end
+		// group 2: coin chute - credit directly, only once the game's own credit
+		// system is live ($FF98D3, set by the arcade init at 0xB5A32). The old
+		// 'jsr $B5960' entered the MIDDLE of the game's coin handler (0xB5924):
+		// it wrote through stale a2/a3 (the VDP control port during that init)
+		// and unlk'd a frame it never linked -> freeze on logo/loading/attract (#14).
 		23'h8E2C9: begin patch_grp = 2'd2; patch_data = 16'h4A79; end
 		23'h8E2CA: begin patch_grp = 2'd2; patch_data = 16'h0011; end
 		23'h8E2CB: begin patch_grp = 2'd2; patch_data = 16'hC600; end
-		23'h8E2CC: begin patch_grp = 2'd2; patch_data = 16'h6706; end
-		23'h8E2CD: begin patch_grp = 2'd2; patch_data = 16'h4EB9; end
-		23'h8E2CE: begin patch_grp = 2'd2; patch_data = 16'h000B; end
-		23'h8E2CF: begin patch_grp = 2'd2; patch_data = 16'h5960; end
-		23'h8E2D0: begin patch_grp = 2'd2; patch_data = 16'h4E75; end
+		23'h8E2CC: begin patch_grp = 2'd2; patch_data = 16'h6744; end
+		23'h8E2CD: begin patch_grp = 2'd2; patch_data = 16'h4A39; end
+		23'h8E2CE: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2CF: begin patch_grp = 2'd2; patch_data = 16'h98D3; end
+		23'h8E2D0: begin patch_grp = 2'd2; patch_data = 16'h673C; end
+		23'h8E2D1: begin patch_grp = 2'd2; patch_data = 16'h1039; end
+		23'h8E2D2: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2D3: begin patch_grp = 2'd2; patch_data = 16'h98D5; end
+		23'h8E2D4: begin patch_grp = 2'd2; patch_data = 16'h0C00; end
+		23'h8E2D5: begin patch_grp = 2'd2; patch_data = 16'h001F; end
+		23'h8E2D6: begin patch_grp = 2'd2; patch_data = 16'h6230; end
+		23'h8E2D7: begin patch_grp = 2'd2; patch_data = 16'h5200; end
+		23'h8E2D8: begin patch_grp = 2'd2; patch_data = 16'h13C0; end
+		23'h8E2D9: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2DA: begin patch_grp = 2'd2; patch_data = 16'h98D5; end
+		23'h8E2DB: begin patch_grp = 2'd2; patch_data = 16'h4A39; end
+		23'h8E2DC: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2DD: begin patch_grp = 2'd2; patch_data = 16'h98D0; end
+		23'h8E2DE: begin patch_grp = 2'd2; patch_data = 16'h6720; end
+		23'h8E2DF: begin patch_grp = 2'd2; patch_data = 16'h0C00; end
+		23'h8E2E0: begin patch_grp = 2'd2; patch_data = 16'h0007; end
+		23'h8E2E1: begin patch_grp = 2'd2; patch_data = 16'h621A; end
+		23'h8E2E2: begin patch_grp = 2'd2; patch_data = 16'h4878; end
+		23'h8E2E3: begin patch_grp = 2'd2; patch_data = 16'h013F; end
+		23'h8E2E4: begin patch_grp = 2'd2; patch_data = 16'h4878; end
+		23'h8E2E5: begin patch_grp = 2'd2; patch_data = 16'h0120; end
+		23'h8E2E6: begin patch_grp = 2'd2; patch_data = 16'h4878; end
+		23'h8E2E7: begin patch_grp = 2'd2; patch_data = 16'h4056; end
+		23'h8E2E8: begin patch_grp = 2'd2; patch_data = 16'h4878; end
+		23'h8E2E9: begin patch_grp = 2'd2; patch_data = 16'h003F; end
+		23'h8E2EA: begin patch_grp = 2'd2; patch_data = 16'h4EB9; end
+		23'h8E2EB: begin patch_grp = 2'd2; patch_data = 16'h0003; end
+		23'h8E2EC: begin patch_grp = 2'd2; patch_data = 16'h1414; end
+		23'h8E2ED: begin patch_grp = 2'd2; patch_data = 16'h4FEF; end
+		23'h8E2EE: begin patch_grp = 2'd2; patch_data = 16'h0010; end
+		23'h8E2EF: begin patch_grp = 2'd2; patch_data = 16'h4E75; end
 		// group 2: FPGA registers @0x11C600-0x11C60A
 		23'h8E300: begin patch_grp = 2'd2; patch_data = coin_w;      end
 		23'h8E302: begin patch_grp = 2'd2; patch_data = vp1_held_w;  end
