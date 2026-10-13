@@ -48,9 +48,10 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT LOW
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 3
 
 set_global_assignment -name VERILOG_MACRO "EXT_CLOCKS=1"
+set_global_assignment -name VERILOG_MACRO "USE_FX68K=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl
@@ -211,8 +212,11 @@ set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name CDF_FILE jtag.cdf
 set_global_assignment -name QIP_FILE sys/sys.qip
 set_global_assignment -name QIP_FILE rtl/VM2413/opll.qip
-set_global_assignment -name QIP_FILE rtl/SVP/SVP.qip
+# set_global_assignment -name QIP_FILE rtl/SVP/SVP.qip  # Paprium: SVP stripped
 set_global_assignment -name QIP_FILE "rtl/nuked-md.qip"
+# ONEVAR-B disabled: set_global_assignment -name QIP_FILE "rtl/fx68k/fx68k.qip"
+set_global_assignment -name SEARCH_PATH "rtl/fx68k"
+set_global_assignment -name SEARCH_PATH "rtl/nuked-md"
 set_global_assignment -name VHDL_FILE rtl/bram.vhd
 set_global_assignment -name VERILOG_FILE rtl/ram_md.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
@@ -221,7 +225,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/EEPROM_24CXX.sv
 set_global_assignment -name VERILOG_FILE rtl/audio_iir_filter.v
 set_global_assignment -name VERILOG_FILE rtl/genesis_lpf.v
 set_global_assignment -name VHDL_FILE rtl/CEGen.vhd
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/cheatcodes.sv
+# set_global_assignment -name SYSTEMVERILOG_FILE rtl/cheatcodes.sv  # Paprium: cheats OSD stripped
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio_cond.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video_cond.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cofi.sv
@@ -343,3 +347,16 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SDIO_DAT[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SD_SPI*
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to USER_IO[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to VGA_EN
+set_global_assignment -name QIP_FILE rtl/fx68k/fx68k.qip
+
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_cdda_fetch.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_cdda_buf.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_cdda_play.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_ima_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_pcm_load.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_addons.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_mcd_link.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_xlink.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_snoop.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/PAPRIUM/paprium_xwin.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/synch_3.sv

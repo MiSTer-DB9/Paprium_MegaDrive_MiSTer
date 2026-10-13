@@ -58,3 +58,14 @@ quartus_*.log
 # Sim / scratch dirs
 sim/
 work/
+# CPU MATE (0.2.6): the brain is game-derived code and ships only as the release download
+# cpu-mate-brain_0.2.6.zip. The four firmware images contain it, so none of these may be committed.
+/cpu-mate-brain/
+brain.bin
+cf.bin
+rodata.bin
+/rtl/PAPRIUM/mcu.txt
+/rtl/PAPRIUM/mcu_ext.txt
+/rtl/PAPRIUM/wram_hi.txt
+/rtl/PAPRIUM/wram_lo.txt
+/build_output/
