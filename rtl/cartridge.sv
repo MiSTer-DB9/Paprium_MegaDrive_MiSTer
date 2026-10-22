@@ -65,6 +65,30 @@ module cartridge
 	input      [15:0] jcart_data,
 	output reg        jcart_th,
 
+	input             arcade_unlock,
+	input             coin_btn,
+	input       [4:0] stage_sel,
+	input             vpad_en,    // Paprium virtual 6-button (hook injection)
+	input             scum_health, // SCUM! Little Man: Infinite Life   (status[76])
+	input             scum_pills,  // SCUM! Little Man: Infinite Pills  (status[77])
+	input             scum_lives,  // SCUM! Little Man: Infinite Lives  (status[78])
+	// MiSTer: buddy Stage 2 - the Paprium MCU's external-memory bus (clk domain) out to
+	// MegaDrive.sv (compact SRAM window paprium_xwin, register block paprium_xlink), the option-D status into
+	// the MCU's FPGAIO ctrl [14:8], and the OSD rows into the MCU's gpio_i. (the earlier test_tap removed:
+	// FPGAIO slot 6 is the buddy's mailbox-latch clear now.)
+	output            xb_req,
+	output      [1:0] xb_region,
+	output     [23:0] xb_addr,
+	output      [3:0] xb_sel,
+	output            xb_wr,
+	output     [31:0] xb_wdata,
+	input      [31:0] xb_rdata,
+	input             xb_ack,
+	input       [6:0] link_status,
+	input      [31:0] mcu_gpio_in,
+	input       [3:0] vpad1,      // {MODE,Z,Y,X} held, port 1 (raw joystick)
+	input       [3:0] vpad2,
+
 	output reg        gun_type,
 	output reg  [7:0] gun_sensor_delay,
 
@@ -87,7 +111,7 @@ module cartridge
 	output signed [15:0] paprium_sfx_l,
 	output signed [15:0] paprium_sfx_r,
 
-	// MCU port-2 (flash/workspace) write taps for the DDR diag
+	// MCU port-2 (flash/workspace) write taps (debug outputs)
 	output     [24:1] dbg_mcu_mem_addr,
 	output     [15:0] dbg_mcu_mem_din,
 	output            dbg_mcu_mem_wrl,
@@ -194,14 +218,221 @@ wire [15:0] rom_data;
 reg         rom_rd;
 reg         dtack_ext;
 
+// Paprium hidden Arcade Mode unlock (adroxe's paprium_arcade.ips) + virtual
+// 6-button, both applied on the fly as ROM-read substitution. Groups:
+//  1 = arcade-only DIP-check BEQ->NOP (adroxe: falls through, sends 0x810F),
+//  2 = pad-hook + code cave + FPGA registers (serves arcade coin AND virtual
+//      6-button; a disabled feature's registers read as 0).
+// Cave v3, hooked from the pad-read routine's unlk/rts at 0xB2392 (word
+// 0x591C9), mirroring that routine's own or.w merges of ports 3/4 into 1/2:
+//   unlk a6
+//   move.w $11C604,d0 ; or.w d0,$FF7028   ; P1 held  XYZ/Mode (SGDK bits 8-11)
+//   move.w $11C608,d0 ; or.w d0,$FF702A   ; P1 just-pressed (FPGA edge latch)
+//   move.w $11C606,d0 ; or.w d0,$FF7038   ; P2 held
+//   move.w $11C60A,d0 ; or.w d0,$FF703A   ; P2 just-pressed
+//   tst.w $11C600 ; beq done           (arcade coin chute, latched by FPGA)
+//   tst.b $FF98D3 ; beq done           (game's credit system live?)
+//   credits $FF98D5 += 1 (cap $1F)      (as the game's handler does)
+//   coin sound via jsr $31414, gated like the game ($FF98D0, <=7)
+//   done: rts
+// Keyed on the latched rom_addr (stable when the SDRAM read completes); the
+// patch addresses sit far below the Paprium stream workspace so stream reads
+// can never alias. Gated on paprium_quirk so no other cart is ever touched.
+reg  [2:0]  coin_sync;
+reg         coin_pending;
+wire        hook_en     = paprium_quirk & (arcade_unlock | vpad_en);
+wire        patch_serve = (rom_req == rom_ack) & rom_rd & hook_en;
+wire        coin_served = patch_serve & (rom_addr[23:1] == 23'h8E300) & coin_pending;
+wire        vp1_served  = patch_serve & (rom_addr[23:1] == 23'h8E304);
+wire        vp2_served  = patch_serve & (rom_addr[23:1] == 23'h8E305);
+
+reg  [3:0] vp1_d, vp2_d, vp1_press, vp2_press;
+always @(posedge clk_ram) begin
+	coin_sync <= {coin_sync[1:0], coin_btn};
+	if(coin_sync[1] & ~coin_sync[2]) coin_pending <= 1;   // press edge
+	else if(coin_served)             coin_pending <= 0;   // one coin per press
+
+	vp1_d <= vpad1;
+	vp2_d <= vpad2;
+	if(~vpad_en) begin
+		vp1_press <= 0;
+		vp2_press <= 0;
+	end
+	else begin
+		vp1_press <= (vp1_served ? 4'd0 : vp1_press) | (vpad1 & ~vp1_d);
+		vp2_press <= (vp2_served ? 4'd0 : vp2_press) | (vpad2 & ~vp2_d);
+	end
+end
+
+// {MODE,Z,Y,X} -> SGDK word bits 11:8
+wire [15:0] vp1_held_w  = vpad_en ? {4'd0, vpad1,     8'd0} : 16'd0;
+wire [15:0] vp2_held_w  = vpad_en ? {4'd0, vpad2,     8'd0} : 16'd0;
+wire [15:0] vp1_press_w = vpad_en ? {4'd0, vp1_press, 8'd0} : 16'd0;
+wire [15:0] vp2_press_w = vpad_en ? {4'd0, vp2_press, 8'd0} : 16'd0;
+wire [15:0] coin_w      = (arcade_unlock & paprium_quirk) ? {15'd0, coin_pending} : 16'd0;
+
+// Paprium arcade-mode stage select (per krikzz): ROM byte 0x0B0A15 is the
+// arcade start stage (0x01 = BLOCK 888 default). Substitute the containing
+// word (0x0B0A14 = 0x0001 -> 0x00SS). OSD values 1..24 map to stages
+// 0x01-0x18 in order; 25 = ARENA (0x1E). 0 = Off (ROM untouched).
+wire [7:0]  stage_byte = (stage_sel == 5'd25) ? 8'h1E : {3'b000, stage_sel};
+wire        stage_hit  = (rom_addr[23:1] == 23'h5850A) & (stage_sel != 0) & paprium_quirk;
+wire [15:0] stage_data = {8'h00, stage_byte};
+
+reg  [15:0] patch_data;
+reg  [2:0]  patch_grp;
+// SCUM! Little Man cheats (word list = the Pocket core's scum_table.py / paprium_scum.sv G_HEALTH /
+// G_PILLS / G_LIVES, every "was" word re-checked against the ROM). Groups 3/4/5. The switches are latched
+// at core reset and at each served read of the pad routine word $0B2390, so a flip
+// takes effect at a frame boundary, never mid-routine. Off = the ROM word (patch_hit = 0).
+reg         lat_health = 1'b0, lat_pills = 1'b0, lat_lives = 1'b0;
+wire        cheat_latch = (rom_req == rom_ack) & rom_rd & (rom_addr[23:1] == 23'h591C8);
+always @(posedge clk_ram) begin
+	if (reset | cheat_latch) begin
+		lat_health <= scum_health;
+		lat_pills  <= scum_pills;
+		lat_lives  <= scum_lives;
+	end
+end
+wire        patch_hit = (patch_grp == 3'd1) ? (paprium_quirk & arcade_unlock) :
+                        (patch_grp == 3'd2) ? hook_en :
+                        (patch_grp == 3'd3) ? (paprium_quirk & lat_health) :
+                        (patch_grp == 3'd4) ? (paprium_quirk & lat_pills) :
+                        (patch_grp == 3'd5) ? (paprium_quirk & lat_lives) : 1'b0;
+always @(*) begin
+	patch_grp  = 3'd0;
+	patch_data = 16'h0000;
+	case(rom_addr[23:1])
+		// group 1: 0xB5AB8/0xB5ACC BEQ -> NOP (force arcade DIP path)
+		23'h5AD5C: begin patch_grp = 2'd1; patch_data = 16'h4E71; end
+		23'h5AD66: begin patch_grp = 2'd1; patch_data = 16'h4E71; end
+		// group 2: 0xB2392 hook -> jmp $11C560
+		23'h591C9: begin patch_grp = 2'd2; patch_data = 16'h4EF9; end
+		23'h591CA: begin patch_grp = 2'd2; patch_data = 16'h0011; end
+		23'h591CB: begin patch_grp = 2'd2; patch_data = 16'hC560; end
+		// group 2: cave v3 @0x11C560 (vpad inject + coin chute)
+		23'h8E2B0: begin patch_grp = 2'd2; patch_data = 16'h4E5E; end
+		23'h8E2B1: begin patch_grp = 2'd2; patch_data = 16'h3039; end
+		23'h8E2B2: begin patch_grp = 2'd2; patch_data = 16'h0011; end
+		23'h8E2B3: begin patch_grp = 2'd2; patch_data = 16'hC604; end
+		23'h8E2B4: begin patch_grp = 2'd2; patch_data = 16'h8179; end
+		23'h8E2B5: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2B6: begin patch_grp = 2'd2; patch_data = 16'h7028; end
+		23'h8E2B7: begin patch_grp = 2'd2; patch_data = 16'h3039; end
+		23'h8E2B8: begin patch_grp = 2'd2; patch_data = 16'h0011; end
+		23'h8E2B9: begin patch_grp = 2'd2; patch_data = 16'hC608; end
+		23'h8E2BA: begin patch_grp = 2'd2; patch_data = 16'h8179; end
+		23'h8E2BB: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2BC: begin patch_grp = 2'd2; patch_data = 16'h702A; end
+		23'h8E2BD: begin patch_grp = 2'd2; patch_data = 16'h3039; end
+		23'h8E2BE: begin patch_grp = 2'd2; patch_data = 16'h0011; end
+		23'h8E2BF: begin patch_grp = 2'd2; patch_data = 16'hC606; end
+		23'h8E2C0: begin patch_grp = 2'd2; patch_data = 16'h8179; end
+		23'h8E2C1: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2C2: begin patch_grp = 2'd2; patch_data = 16'h7038; end
+		23'h8E2C3: begin patch_grp = 2'd2; patch_data = 16'h3039; end
+		23'h8E2C4: begin patch_grp = 2'd2; patch_data = 16'h0011; end
+		23'h8E2C5: begin patch_grp = 2'd2; patch_data = 16'hC60A; end
+		23'h8E2C6: begin patch_grp = 2'd2; patch_data = 16'h8179; end
+		23'h8E2C7: begin patch_grp = 2'd2; patch_data = 16'h00FF; end
+		23'h8E2C8: begin patch_grp = 2'd2; patch_data = 16'h703A; end
+		// group 2: coin chute - credit directly, only once the game's own credit
+		// system is live ($FF98D3, set by the arcade init at 0xB5A32). The old
+		// 'jsr $B5960' entered the MIDDLE of the game's coin handler (0xB5924):
+		// it wrote through stale a2/a3 (the VDP control port during that init)
+		// and unlk'd a frame it never linked -> freeze on logo/loading/attract (#14).
+		23'h8E2C9: begin patch_grp = 3'd2; patch_data = 16'h4A79; end
+		23'h8E2CA: begin patch_grp = 3'd2; patch_data = 16'h0011; end
+		23'h8E2CB: begin patch_grp = 3'd2; patch_data = 16'hC600; end
+		23'h8E2CC: begin patch_grp = 3'd2; patch_data = 16'h6744; end
+		23'h8E2CD: begin patch_grp = 3'd2; patch_data = 16'h4A39; end
+		23'h8E2CE: begin patch_grp = 3'd2; patch_data = 16'h00FF; end
+		23'h8E2CF: begin patch_grp = 3'd2; patch_data = 16'h98D3; end
+		23'h8E2D0: begin patch_grp = 3'd2; patch_data = 16'h673C; end
+		23'h8E2D1: begin patch_grp = 3'd2; patch_data = 16'h1039; end
+		23'h8E2D2: begin patch_grp = 3'd2; patch_data = 16'h00FF; end
+		23'h8E2D3: begin patch_grp = 3'd2; patch_data = 16'h98D5; end
+		23'h8E2D4: begin patch_grp = 3'd2; patch_data = 16'h0C00; end
+		23'h8E2D5: begin patch_grp = 3'd2; patch_data = 16'h001F; end
+		23'h8E2D6: begin patch_grp = 3'd2; patch_data = 16'h6230; end
+		23'h8E2D7: begin patch_grp = 3'd2; patch_data = 16'h5200; end
+		23'h8E2D8: begin patch_grp = 3'd2; patch_data = 16'h13C0; end
+		23'h8E2D9: begin patch_grp = 3'd2; patch_data = 16'h00FF; end
+		23'h8E2DA: begin patch_grp = 3'd2; patch_data = 16'h98D5; end
+		23'h8E2DB: begin patch_grp = 3'd2; patch_data = 16'h4A39; end
+		23'h8E2DC: begin patch_grp = 3'd2; patch_data = 16'h00FF; end
+		23'h8E2DD: begin patch_grp = 3'd2; patch_data = 16'h98D0; end
+		23'h8E2DE: begin patch_grp = 3'd2; patch_data = 16'h6720; end
+		23'h8E2DF: begin patch_grp = 3'd2; patch_data = 16'h0C00; end
+		23'h8E2E0: begin patch_grp = 3'd2; patch_data = 16'h0007; end
+		23'h8E2E1: begin patch_grp = 3'd2; patch_data = 16'h621A; end
+		23'h8E2E2: begin patch_grp = 3'd2; patch_data = 16'h4878; end
+		23'h8E2E3: begin patch_grp = 3'd2; patch_data = 16'h013F; end
+		23'h8E2E4: begin patch_grp = 3'd2; patch_data = 16'h4878; end
+		23'h8E2E5: begin patch_grp = 3'd2; patch_data = 16'h0120; end
+		23'h8E2E6: begin patch_grp = 3'd2; patch_data = 16'h4878; end
+		23'h8E2E7: begin patch_grp = 3'd2; patch_data = 16'h4056; end
+		23'h8E2E8: begin patch_grp = 3'd2; patch_data = 16'h4878; end
+		23'h8E2E9: begin patch_grp = 3'd2; patch_data = 16'h003F; end
+		23'h8E2EA: begin patch_grp = 3'd2; patch_data = 16'h4EB9; end
+		23'h8E2EB: begin patch_grp = 3'd2; patch_data = 16'h0003; end
+		23'h8E2EC: begin patch_grp = 3'd2; patch_data = 16'h1414; end
+		23'h8E2ED: begin patch_grp = 3'd2; patch_data = 16'h4FEF; end
+		23'h8E2EE: begin patch_grp = 3'd2; patch_data = 16'h0010; end
+		23'h8E2EF: begin patch_grp = 3'd2; patch_data = 16'h4E75; end
+		// group 2: FPGA registers @0x11C600-0x11C60A
+		23'h8E300: begin patch_grp = 2'd2; patch_data = coin_w;      end
+		23'h8E302: begin patch_grp = 2'd2; patch_data = vp1_held_w;  end
+		23'h8E303: begin patch_grp = 2'd2; patch_data = vp2_held_w;  end
+		23'h8E304: begin patch_grp = 2'd2; patch_data = vp1_press_w; end
+		23'h8E305: begin patch_grp = 2'd2; patch_data = vp2_press_w; end
+		// group 3: Infinite Life - players take no damage (jsr to the slot test); specials cost no health
+		23'h17D62: begin patch_grp = 3'd3; patch_data = 16'h4EB9; end   // 0x02FAC4 was 302A
+		23'h17D63: begin patch_grp = 3'd3; patch_data = 16'h000B; end   // 0x02FAC6 was 0088
+		23'h17D64: begin patch_grp = 3'd3; patch_data = 16'hF000; end   // 0x02FAC8 was B640
+		23'h18745: begin patch_grp = 3'd3; patch_data = 16'h4E71; end   // 0x030E8A was 3340
+		23'h18746: begin patch_grp = 3'd3; patch_data = 16'h4E71; end   // 0x030E8C was 0088
+		// health cave 0x0BF000-0x0BF02D (ROM zero padding)
+		23'h5F800: begin patch_grp = 3'd3; patch_data = 16'h200A; end
+		23'h5F801: begin patch_grp = 3'd3; patch_data = 16'h0280; end
+		23'h5F802: begin patch_grp = 3'd3; patch_data = 16'h00FF; end
+		23'h5F803: begin patch_grp = 3'd3; patch_data = 16'hFFFF; end
+		23'h5F804: begin patch_grp = 3'd3; patch_data = 16'h0480; end
+		23'h5F805: begin patch_grp = 3'd3; patch_data = 16'h00FF; end
+		23'h5F806: begin patch_grp = 3'd3; patch_data = 16'h8710; end
+		23'h5F807: begin patch_grp = 3'd3; patch_data = 16'h6516; end
+		23'h5F808: begin patch_grp = 3'd3; patch_data = 16'hE088; end
+		23'h5F809: begin patch_grp = 3'd3; patch_data = 16'h5280; end
+		23'h5F80A: begin patch_grp = 3'd3; patch_data = 16'h0C80; end
+		23'h5F80B: begin patch_grp = 3'd3; patch_data = 16'h0000; end
+		23'h5F80C: begin patch_grp = 3'd3; patch_data = 16'h00FF; end
+		23'h5F80D: begin patch_grp = 3'd3; patch_data = 16'h620A; end
+		23'h5F80E: begin patch_grp = 3'd3; patch_data = 16'hB039; end
+		23'h5F80F: begin patch_grp = 3'd3; patch_data = 16'h00FF; end
+		23'h5F810: begin patch_grp = 3'd3; patch_data = 16'h9903; end
+		23'h5F811: begin patch_grp = 3'd3; patch_data = 16'h6402; end
+		23'h5F812: begin patch_grp = 3'd3; patch_data = 16'h7600; end
+		23'h5F813: begin patch_grp = 3'd3; patch_data = 16'h302A; end
+		23'h5F814: begin patch_grp = 3'd3; patch_data = 16'h0088; end
+		23'h5F815: begin patch_grp = 3'd3; patch_data = 16'hB640; end
+		23'h5F816: begin patch_grp = 3'd3; patch_data = 16'h4E75; end
+		// group 4: Infinite Pills - subq.b #1,$19(a0,d0.l) -> nop nop
+		23'h0D4FD: begin patch_grp = 3'd4; patch_data = 16'h4E71; end   // 0x01A9FA was 5330
+		23'h0D4FE: begin patch_grp = 3'd4; patch_data = 16'h4E71; end   // 0x01A9FC was 0819
+		// group 5: Infinite Lives - subq.b #1,d0 -> nop
+		23'h15277: begin patch_grp = 3'd5; patch_data = 16'h4E71; end   // 0x02A4EE was 5300
+		default: ;
+	endcase
+end
+
 always @(posedge clk_ram) begin
 	reg rd_old, we_old;
-	
+
 	if(~sdram_rd) dtack_ext <= 0;
 
 	if(rom_req == rom_ack) begin
 		if(rom_rd) begin
-			cart_data <= rom_data;
+			cart_data <= patch_hit ? patch_data : stage_hit ? stage_data : rom_data;
 			if(cart_cs_ext) dtack_ext <= 1;
 		end
 		rom_rd <= 0;
@@ -264,48 +495,16 @@ always_comb begin
 	end
 end
 
-reg [16:1] ram_rst_a;
-always @(posedge clk) ram_rst_a <= ram_rst_a + 1'd1;
+// FXR2: cart SRAM/EEPROM/save RAM (the 128 KB, 128-M10K true dual-port RAM named ram) removed for the Paprium-only build.
+// Removed with it: its port-B mux (cart_dl clear / SVP DRAM / HPS save) and the ram_rst_a clear counter (dead after removal).
+// Paprium saves use paprium_backup: save_do/save_change below still select paprium_save_do/paprium_save_change when paprium_active.
+// Read data is the blank-SRAM pattern 0xFF (what the cart_dl clear loop wrote for !sram00_quirk carts).
+// sram_q is never selected for Paprium: md_sram_cs needs md_bank_sram (blocked for paprium_quirk) or cart_addr >= rom_sz.
+wire [15:0] sram2_q = 16'hFFFF;
+assign sram_q = 8'hFF;
 
-wire [15:0] sram2_addr;
-wire [15:0] sram2_di;
-wire [15:0] sram2_q;
-wire        sram2_wren;
-
-always_comb begin
-	if(cart_dl) begin
-		sram2_addr = ram_rst_a;
-		sram2_di   = sram00_quirk ? 16'h0000 : 16'hFFFF;
-		sram2_wren = 1;
-	end
-	else if(svp_quirk) begin
-		sram2_addr = svp_dram_a;
-		sram2_di   = svp_dram_do;
-		sram2_wren = svp_dram_we;
-	end
-	else begin
-		sram2_addr = save_addr;
-		sram2_di   = save_di;
-		sram2_wren = save_wr;
-	end
-end
-
-dpram_dif #(17,8,16,16) ram
-(
-	.clock(clk),
-	.address_a(sram_addr),
-	.data_a(sram_di),
-	.wren_a(sram_wren),
-	.q_a(sram_q),
-
-	.address_b(sram2_addr),
-	.data_b(sram2_di),
-	.wren_b(sram2_wren),
-	.q_b(sram2_q)
-);
-
-assign save_do     = sram2_q;
-assign save_change = sram_wren;
+assign save_do     = paprium_active ? paprium_save_do     : sram2_q;
+assign save_change = paprium_active ? paprium_save_change : sram_wren;
 
 //---------------------- MD cart ---------------------------------------
 
@@ -365,6 +564,8 @@ wire [15:0] paprium_mem_din;
 wire        paprium_mem_wrl;
 wire        paprium_mem_wrh;
 wire        paprium_mem_req;
+wire [15:0] paprium_save_do;
+wire        paprium_save_change;
 reg         paprium_stream_pending = 0;
 reg         paprium_stream_ack_toggle = 0;
 
@@ -411,6 +612,11 @@ paprium_cart paprium
 	.mdp_current_track(mdp_current_track),
 	.sfx_l(paprium_sfx_l),
 	.sfx_r(paprium_sfx_r),
+	.save_addr(save_addr),
+	.save_di(save_di),
+	.save_do(paprium_save_do),
+	.save_wr(save_wr),
+	.save_change(paprium_save_change),
 	.dbg_ramdp_write(dbg_ramdp_write),
 	.dbg_ramdp_addr(dbg_ramdp_addr),
 	.dbg_ramdp_data(dbg_ramdp_data),
@@ -420,44 +626,68 @@ paprium_cart paprium
 	.mem_wrl(paprium_mem_wrl),
 	.mem_wrh(paprium_mem_wrh),
 	.mem_req(paprium_mem_req),
-	.mem_ack(rom2_ack)
+	.mem_ack(rom2_ack),
+
+	// MiSTer: buddy Stage 2 + OSD rows
+	.xb_req(xb_req),
+	.xb_region(xb_region),
+	.xb_addr(xb_addr),
+	.xb_sel(xb_sel),
+	.xb_wr(xb_wr),
+	.xb_wdata(xb_wdata),
+	.xb_rdata(xb_rdata),
+	.xb_ack(xb_ack),
+	.link_status(link_status),
+	.gpio_in(mcu_gpio_in)
 );
+
+// Paprium-only: SVP (Virtua Racing) stripped to reclaim M10K/ALM
+localparam ENABLE_SVP = 0;
 
 wire [15:0] svp_data;
 wire        svp_dtack_n;
-
 wire [15:0] svp_dram_a;
 wire [15:0] svp_dram_do;
 wire        svp_dram_we;
 
-reg svp_ce;
-always @(posedge clk) svp_ce <= ~reset & ~svp_ce;
+generate
+if (ENABLE_SVP) begin : gen_svp
+	reg svp_ce;
+	always @(posedge clk) svp_ce <= ~reset & ~svp_ce;
 
-SVP svp
-(
-	.CLK(clk),
-	.CE(svp_ce),
-	.RST_N(~reset & svp_quirk),
-	.ENABLE(1),
+	SVP svp
+	(
+		.CLK(clk),
+		.CE(svp_ce),
+		.RST_N(~reset & svp_quirk),
+		.ENABLE(1),
 
-	.BUS_A(cart_addr[23:1]),
-	.BUS_DO(svp_data),
-	.BUS_DI(cart_data_wr),
-	.BUS_SEL(cart_oe | cart_lwr),
-	.BUS_RNW(~cart_lwr),
-	.BUS_DTACK_N(svp_dtack_n),
-	.DMA_ACTIVE(cart_dma),
+		.BUS_A(cart_addr[23:1]),
+		.BUS_DO(svp_data),
+		.BUS_DI(cart_data_wr),
+		.BUS_SEL(cart_oe | cart_lwr),
+		.BUS_RNW(~cart_lwr),
+		.BUS_DTACK_N(svp_dtack_n),
+		.DMA_ACTIVE(cart_dma),
 
-	.ROM_A(rom2_a),
-	.ROM_DI(rom2_data),
-	.ROM_REQ(rom2_req),
-	.ROM_ACK(rom2_ack),
+		.ROM_A(rom2_a),
+		.ROM_DI(rom2_data),
+		.ROM_REQ(rom2_req),
+		.ROM_ACK(rom2_ack),
 
-	.DRAM_A(svp_dram_a),
-	.DRAM_DI(sram2_q),
-	.DRAM_DO(svp_dram_do),
-	.DRAM_WE(svp_dram_we)
-);
+		.DRAM_A(svp_dram_a),
+		.DRAM_DI(sram2_q),
+		.DRAM_DO(svp_dram_do),
+		.DRAM_WE(svp_dram_we)
+	);
+end else begin : gen_svp_stub
+	assign svp_data    = 16'h0;
+	assign svp_dtack_n = 1'b1;
+	assign svp_dram_a  = 16'h0;
+	assign svp_dram_do = 16'h0;
+	assign svp_dram_we = 1'b0;
+end
+endgenerate
 
 // SRAM
 wire md_sram_cs = ~cart_ms && (cart_addr[23:21] == 1) && (md_bank_sram || (cart_addr >= rom_sz && ~&cart_addr[20:19])) && ~noram_quirk;
@@ -510,24 +740,14 @@ wire eeprom_sda = {eeprom_sdao & eeprom_sdai};
 //                                        C01     C01     C02     C16      C65       C08      C04
 wire [12:0] eeprom_mask[8] = '{13'h00, 13'h7f, 13'h7f, 13'hff, 13'h7ff, 13'h1fff, 13'h3ff, 13'h1ff};
 
-EPPROM_24CXX e24cxx
-(
-	.clk(clk),
-	.rst(reset),
-	.en(1),
-
-	.mode((eeprom_quirk[2:0] <= 3'b010) ? 2'd0 : (eeprom_quirk[2:0] == 3'b101) ? 2'd2 : 2'd1),
-	.mask(eeprom_mask[eeprom_quirk[2:0]]),
-
-	.sda_i(eeprom_sdai),
-	.sda_o(eeprom_sdao),
-	.scl(eeprom_scl),
-
-	.ram_addr(eeprom_ram_a),
-	.ram_d(eeprom_ram_d),
-	.ram_wr(eeprom_ram_we),
-	.ram_q(sram_q)
-);
+// FXMAPPER1B: EPPROM_24CXX e24cxx removed (non-Paprium X24C01..24C65 EEPROM cores). Outputs tied to idle:
+//   sda_o = 1 (module's IDLE/released-bus level), ram_addr = 0, ram_d = 0, ram_wr = 0.
+// eeprom_scl/eeprom_sdai/eeprom_quirk glue, md_eeprom_cs/md_eeprom_data, the sram_* mux and cart_data mux are left as-is.
+// pier_eeprom (STM95XXX) is kept in this build.
+assign eeprom_sdao    = 1'b1;
+assign eeprom_ram_a   = 15'h0;
+assign eeprom_ram_d   = 8'h00;
+assign eeprom_ram_we  = 1'b0;
 
 
 // PIER EEPROM
@@ -948,8 +1168,8 @@ always @(posedge clk) begin
 			else if(cart_id[63:0] == "T-113016") noram_quirk  <= 1;        // Puggsy fake ram check
 			else if(cart_id[63:0] == "T-574023") pier_quirk   <= 1;        // Pier Solar Reprint
 			else if(cart_id[63:0] == "T-574013") pier_quirk   <= 1;        // Pier Solar 1st Edition
-			else if(cart_id[63:0] == "MK-1229 ") svp_quirk    <= 1;        // Virtua Racing EU/US
-			else if(cart_id[63:0] == "G-7001  ") svp_quirk    <= 1;        // Virtua Racing JP
+			// else if(cart_id[63:0] == "MK-1229 ") svp_quirk    <= 1;        // Virtua Racing EU/US (SVP stripped)
+			// else if(cart_id[63:0] == "G-7001  ") svp_quirk    <= 1;        // Virtua Racing JP (SVP stripped)
 			else if(cart_id[63:0] == "T-35036 ") fmbusy_quirk <= 1;        // Hellfire US
 			else if(cart_id[63:0] == "T-25073 ") fmbusy_quirk <= 1;        // Hellfire JP
 			else if(cart_id[63:0] == "MK-1137-") fmbusy_quirk <= 1;        // Hellfire EU

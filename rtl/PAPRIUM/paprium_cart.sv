@@ -1,4 +1,5 @@
 module paprium_cart
+#(parameter SFX = 1'b1, parameter CMDLOG = 1'b0)
 (
 	input             clk,
 	input             reset,
@@ -41,13 +42,44 @@ module paprium_cart
 	output     [10:0] dbg_ramdp_addr,
 	output     [31:0] dbg_ramdp_data,
 
+	// paprium: mailbox command log read-back (diagnostic builds only)
+	input      [13:0] cmdlog_read_addr,
+	output      [7:0] cmdlog_read_data,
+
+	// Paprium battery-backup save RAM (HPS cartridge save interface)
+	input      [14:0] save_addr,
+	input      [15:0] save_di,
+	output     [15:0] save_do,
+	input             save_wr,
+	output            save_change,
+
 	output     [24:1] mem_addr,
 	output     [15:0] mem_din,
 	input      [15:0] mem_dout,
 	output            mem_wrl,
 	output            mem_wrh,
 	output            mem_req,
-	input             mem_ack
+	input             mem_ack,
+
+	// pocket: xram stage 1 - the MCU's windows on the Pocket SRAM (0x08), CRAM (0x09) and
+	// their register block (0x0A). Served in core_top on this clock (no crossing); the ack
+	// is held until the request drops, like paprium_mcu_mem's
+	output            xb_req,
+	output      [1:0] xb_region,     // 0 SRAM, 1 CRAM, 2 registers
+	output     [23:0] xb_addr,
+	output      [3:0] xb_sel,
+	output            xb_wr,
+	output     [31:0] xb_wdata,
+	input      [31:0] xb_rdata,
+	input             xb_ack,
+
+	// MiSTer: the OSD rows into the NEORV32 gpio_i (firmware ppm_reset reads it):
+	// [0] MegaWire, [3:1] console model. [new, untested]
+	input      [31:0] gpio_in,
+
+	// pocket: xram stage 2 - option-D status (paprium_xlink LSTAT[7:0] less 'armed'); read back
+	// with the mailbox interrupt latch in the FPGAIO ctrl word [15:8]
+	input       [6:0] link_status
 );
 
 	McuBus mcu;
@@ -105,21 +137,36 @@ module paprium_cart
 	wire [31:0] mcu_dati_mem;
 	wire [31:0] mcu_dati_mdp;
 	wire [31:0] mcu_dati_sfx;
+	wire [31:0] mcu_dati_bram;
 	wire [15:0] cpu_dati_ramdp;
 	wire mcu_ack_mem;
+	wire mcu_ack_bram;
 	wire sdram_en;
 
 	wire [31:0] mcu_dati =
 		mcu.map.fpgio ? mcu_dati_fpgio :
 		mcu.map.ramdp ? mcu_dati_ramdp :
-		(mcu.map.flash | mcu.map.sdram | mcu.map.bram) ? mcu_dati_mem :
+		(mcu.map.flash | mcu.map.sdram) ? mcu_dati_mem :
+		mcu.map.bram  ? mcu_dati_bram :
 		mcu.map.mdp   ? mcu_dati_mdp :
 		mcu.map.sfx   ? mcu_dati_sfx :
+		(mcu.map.xram | mcu.map.xcram | mcu.map.xlink) ? xb_rdata :   // pocket: xram stage 1
 		32'hffffffff;
 
 	wire mcu_ack =
-		(mcu.map.flash | mcu.map.sdram | mcu.map.bram) ? mcu_ack_mem :
+		(mcu.map.flash | mcu.map.sdram) ? mcu_ack_mem :
+		mcu.map.bram                    ? mcu_ack_bram :
+		(mcu.map.xram | mcu.map.xcram | mcu.map.xlink) ? xb_ack :   // pocket: xram stage 1
 		1'b1;
+
+	// pocket: xram stage 1
+	assign xb_req    = mcu.ce & (mcu.map.xram | mcu.map.xcram | mcu.map.xlink);
+	assign xb_region = mcu.map.xcram ? 2'd1 : mcu.map.xlink ? 2'd2 : 2'd0;
+	assign xb_addr   = mcu.addr[23:0];
+	assign xb_sel    = mcu.we;   // store lanes; a load always reads the whole word (paprium_xram)
+	assign xb_wr     = (mcu.we != 4'd0);
+	assign xb_wdata  = mcu.dato;
+	// pocket-end
 
 	wire [15:0] wram_dato;
 	wire [15:0] wram_dati;
@@ -131,6 +178,13 @@ module paprium_cart
 	assign wram_addr = wram.addr[18:0];
 	assign wram_we = wram.we;
 
+	// pocket: xram stage 2 - interrupt on the 68000's mailbox post (gate_report item 10). Set by
+	// ramdp_io's write pulse to RAMDP $1FEA (reg_cmd), cleared by an MCU write of bit 0 = 1 to
+	// FPGAIO slot 6 (0x01000018; slot 5 is a diagnostic build's stream_cnt). A level into the
+	// NEORV32's mext_irq_i: 1.4.8.1 buffers it only while MEIE is set, and the shipping firmware
+	// never sets MEIE, so it is unaffected. A set and a clear in the same clock: the set wins.
+	reg  mbx_irq = 1'b0;   // set and cleared below, after cpu_wr_pulse is declared
+
 	mcu_core mcu_inst
 	(
 		.clk(clk),
@@ -138,10 +192,11 @@ module paprium_cart
 		.mcu(mcu),
 		.mcu_dati(mcu_dati),
 		.mcu_ack(mcu_ack),
+		.irq_ext(mbx_irq),
 		.wram(wram),
 		.wram_dato(wram_dato),
 		.gpio_o(),
-		.gpio_i(32'd0),
+		.gpio_i(gpio_in),   // MiSTer: OSD rows
 		.uart_tx(),
 		.uart_rx(1'b1),
 		.debug_bus_ack(),
@@ -164,6 +219,7 @@ module paprium_cart
 	(
 		.mcu(mcu),
 		.md_srst(reset),
+		.link_status({mbx_irq, link_status}),
 		.mcu_dati(mcu_dati_fpgio),
 		.md_rst(md_reset),
 		.exit(),
@@ -183,8 +239,47 @@ module paprium_cart
 		.debug_ramdp_addr(dbg_ramdp_addr),
 		.debug_ramdp_data(dbg_ramdp_data),
 		.debug_cpu_we_act(),
-		.debug_cpu_write()
+		.debug_cpu_write(cpu_wr_pulse)
 	);
+
+	// paprium: snoop the 68k's writes to the command mailbox. CMDLOG is a
+	// localparam at the top level, so this whole block folds away in shipping.
+	wire cpu_wr_pulse;
+
+	// pocket: xram stage 2 - the mailbox interrupt latch (see mbx_irq above)
+	wire mbx_irq_clr = mcu.ce & mcu.map.fpgio & (mcu.addr[5:2] == 4'd6) & mcu.we[0] & mcu.dato[0];
+	always @(posedge clk) begin
+		if (reset | ~enable) mbx_irq <= 1'b0;
+		else if (cpu_wr_pulse & (cpu.addr[12:1] == 12'hFF5)) mbx_irq <= 1'b1;
+		else if (mbx_irq_clr) mbx_irq <= 1'b0;
+	end
+
+	// Channel-7 taps from audio_sfx, declared here because the logger below is
+	// elaborated before the sfx instance that drives them.
+	wire [10:0] ch7_vol;
+	wire        ch7_empty;
+	wire        ch7_wr;
+
+	generate
+		if(CMDLOG) begin : cmdlog_on
+			paprium_cmd_log cmdlog_inst
+			(
+				.clk(clk),
+				.reset(reset),
+				.cpu_wr(cpu_wr_pulse),
+				.cpu_addr(cpu.addr[12:0]),
+				.cpu_data(cpu.dato),
+				.ch7_vol(ch7_vol),
+				.ch7_empty(ch7_empty),
+				.ch7_wr(ch7_wr),
+				.read_addr(cmdlog_read_addr),
+				.read_data(cmdlog_read_data)
+			);
+		end
+		else begin : cmdlog_off
+			assign cmdlog_read_data = 8'd0;
+		end
+	endgenerate
 
 	assign cart_data = cpu_dati_ramdp;
 
@@ -204,6 +299,26 @@ module paprium_cart
 		.mem_ack(mem_ack)
 	);
 
+	paprium_backup backup_inst
+	(
+		.clk(clk),
+		.reset(reset | ~enable),
+		.mcu(mcu),
+		.mcu_dati(mcu_dati_bram),
+		.mcu_ack(mcu_ack_bram),
+		.bram_change(save_change),
+		.save_addr(save_addr),
+		.save_di(save_di),
+		.save_do(save_do),
+		.save_wr(save_wr)
+	);
+
+// paprium: SFX is switchable so a diagnostic bitstream can trade it for the ~700 ALMs
+// needed to fit while a graphics-path fix is being validated on hardware. The cartridge
+// PCM engine has nothing to do with the stream window, so dropping it changes nothing
+// about what such a build proves. SFX=1 is the shipping configuration.
+generate
+if(SFX) begin : sfx_on
 	SndCk snd;
 	wire signed [15:0] sfx_l_raw;
 	wire signed [15:0] sfx_r_raw;
@@ -227,7 +342,10 @@ module paprium_cart
 		.snd(snd),
 		.mcu_dati_sfx(mcu_dati_sfx),
 		.snd_l(sfx_l_raw),
-		.snd_r(sfx_r_raw)
+		.snd_r(sfx_r_raw),
+		.dbg_ch7_vol(ch7_vol),
+		.dbg_ch7_empty(ch7_empty),
+		.dbg_ch7_wr(ch7_wr)
 	);
 
 	always @(posedge clk) begin
@@ -245,6 +363,14 @@ module paprium_cart
 
 	assign sfx_l = (enable & sfx_started & (sfx_volume != 0)) ? sfx_l_raw : 16'sd0;
 	assign sfx_r = (enable & sfx_started & (sfx_volume != 0)) ? sfx_r_raw : 16'sd0;
+end
+else begin : sfx_off
+	assign mcu_dati_sfx = 32'd0;
+	assign sfx_l        = 16'sd0;
+	assign sfx_r        = 16'sd0;
+end
+endgenerate
+// paprium-end
 
 	paprium_mdp_adapter mdp_adapter_inst
 	(

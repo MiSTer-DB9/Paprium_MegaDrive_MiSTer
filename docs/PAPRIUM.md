@@ -20,11 +20,16 @@ sound effects. The SVP chip (Virtua Racing) is retained.
   on-chip.
 - **Decompression / graphics.** The MCU decompresses graphics into the workspace;
   the 68000/VDP read them back through the streaming window via an
-  auto-incrementing pointer.
+  auto-incrementing pointer. The firmware's `0x81` LZ decompressor (`mame.c`)
+  was replaced with the correct Genesis Plus GX / FinalBurn Neo routine
+  (`paprium_decoder_lzo`) — the MAME-derived one is broken and corrupts the
+  subway and a few other areas (fix per krikzz; not yet in stock mega-ppm).
 - **Background music (CDDA).** The MCU's native MD+ commands are bridged to the
   core's MD+ engine and CDDA mixer by `paprium_mdp_adapter.sv`, with an
   EverDrive-FIFO stub so `mdp_init()` completes. No ROM audio conversion is
-  required.
+  required. Paprium's WAV tracks are authored at **48 kHz**, so the CDDA player
+  consumes at 48 kHz for Paprium (44.1 kHz for other MD+ content) — otherwise
+  the music plays ~8% slow.
 - **Sound effects.** Paprium's own self-contained cartridge PCM engine (eight
   channels, each with a FIFO and per-channel sample-rate / pitch / pan / volume)
   is ported as `audio_sfx.sv` and mixed with FM/PSG and CDDA at the top level.
@@ -49,6 +54,28 @@ sound effects. The SVP chip (Virtua Racing) is retained.
   because its board physically crosses the DQ byte lanes; the MiSTer SDRAM is
   straight-wired, so `rtl/PAPRIUM/paprium_mcu_mem.sv` keeps the byte-enables
   straight to reproduce the same net layout.
+
+## Extras (V.05)
+
+- **Arcade Mode unlock** (main OSD page): applies adroxe's `paprium_arcade.ips`
+  (<https://github.com/adroxe/Paprium-Arcade>) on the fly as a ROM-read
+  substitution — the ROM file is never modified. Unlock + reset = "ARCADE
+  PAPRIUM" (friendly fire on, Insert Coin/credits). The IPS's Mode-button
+  credit check is re-targeted at an FPGA "coin chute" register, so **pressing
+  the MiSTer-mapped Mode button (port 1) inserts a coin** — no 6-button pad
+  protocol involved; works in 3-button mode.
+- **Arcade Stage select** (main OSD page): boots arcade mode into any of the 25
+  stages (per krikzz: ROM start-stage byte at `0x0B0A15`, substituted live).
+- **One-shot music (cue requirement):** Main_MiSTer's MD+ player loops every
+  track unless the cue says otherwise. Your `paprium.cue` needs `REM NOLOOP`
+  after the `INDEX 01` line of the one-shot tracks (12 Continue, 29 Game Over,
+  36 High Score, 53 Stage Clear) — or just use the reference
+  [`paprium.cue`](paprium.cue) shipped here.
+- **Controls:** play Paprium with OSD "6 Buttons Mode" = **No** — X/Y/Z are
+  mapped to combos (Y=Down+B, X=B+C, Z=A+B) and Mode inserts coins. (In
+  6-button mode X/Y/Z do nothing: the game's own 6-button read doesn't work on
+  this port — same as EverDrive — and the combo injection disables itself to
+  keep real 6-button games untouched.)
 
 ## Building
 

@@ -88,10 +88,13 @@ always @(posedge clk) begin
 	end
 end
 
+// Stock 3/6-button pad frames. Paprium's X/Y/Z are delivered by the virtual
+// 6-button ROM-hook (cartridge.sv cave v3), which injects them straight into the
+// game's pad struct, so no combo workaround is needed here.
 wire [5:0] pdata;
 always @(posedge clk) begin
 	priority casex({SMS,JCNT,TH})
-		4'b1XXX: pdata <= { ~P_C,     ~P_B, ~P_RIGHT, ~P_LEFT, ~P_DOWN, ~P_UP}; 
+		4'b1XXX: pdata <= { ~P_C,     ~P_B, ~P_RIGHT, ~P_LEFT, ~P_DOWN, ~P_UP};
 		4'b0100: pdata <= { ~P_START, ~P_A,   1'b0,     1'b0,    1'b0,   1'b0};
 		4'b0110: pdata <= { ~P_START, ~P_A,   1'b1,     1'b1,    1'b1,   1'b1};
 		4'b0111: pdata <= { ~P_C,     ~P_B, ~P_MODE,  ~P_X,    ~P_Y,    ~P_Z };

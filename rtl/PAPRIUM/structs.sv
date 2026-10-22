@@ -32,6 +32,9 @@ typedef struct{//mcu memory map
 	bit bram;
 	bit sfx;
 	bit mdp;
+	bit xram;//pocket: 0x08 Pocket SRAM window (xram stage 1)
+	bit xcram;//pocket: 0x09 Pocket CRAM window
+	bit xlink;//pocket: 0x0A xram register block
 	
 	bit fpgio_ctrl;//var control flags
 	bit fpgio_time;//timer
@@ -87,6 +90,12 @@ typedef struct{
 	bit [7:0]pan[2];
 	bit [10:0]vol;
 	bit signed[15:0]pcm;
+	
+	// paprium: per-voice effect flags, from the 16-bit flags word the game writes
+	// to 0x1E16. Our 8-bit `flags` is its HIGH byte, so 0x4000 -> bit 6 and
+	// 0x0100 -> bit 0. GPGX applies both; this port previously applied neither.
+	bit echo;   // 0x4000 - 166 ms delay at 33%, one side per voice
+	bit amp;    // 0x0100 - x1.25 on the running mix
 	
 }SfxOut;
 
